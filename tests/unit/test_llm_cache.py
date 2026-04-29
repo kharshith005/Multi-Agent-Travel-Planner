@@ -33,7 +33,7 @@ def test_cache_key_differs_by_model():
 
 def test_cache_key_differs_by_provider():
     # Claude and Gemini with same text should produce different keys
-    k1 = _cache_key("claude-haiku-4-5@20251001", "sys", "user", "Intent", 1024, False)
+    k1 = _cache_key("claude-haiku-4-5", "sys", "user", "Intent", 1024, False)
     k2 = _cache_key("gemini-2.5-flash-lite", "sys", "user", "Intent", 1024, False)
     assert k1 != k2
 

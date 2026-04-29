@@ -3,7 +3,10 @@
 .pytest_cache/
 __pycache__/
 *.pyc
+*.json
+llm_cache/
 .DS_Store
 eval/results.csv
+*.log
 # *.md
 # !README.md

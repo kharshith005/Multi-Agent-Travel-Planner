@@ -1,57 +1,76 @@
-"""Tests for Step 9.4 — round-trip flight search and cost attribution."""
+"""Tests for round-trip flight search — two-call departure_token protocol."""
 from __future__ import annotations
 
-import re
+import unittest.mock as mock
+
 import pytest
 
-from tools.live_apis import LiveTravelAPIs, _FlightOption, _RoundTripPair
+from tools.live_apis import LiveTravelAPIs, _FlightOption
 
 
-# ── Helper: build a minimal fake SerpAPI round-trip payload ──────────────────
+# ── Helpers: build minimal SerpAPI payloads ──────────────────────────────────
 
-def _rt_payload(pairs: list[tuple]) -> dict:
-    """Build a SerpAPI-style round-trip payload.
-
-    Each pair: (out_airline, out_dep, out_arr, out_dur, price,
-                ret_airline, ret_dep, ret_arr, ret_dur)
-    """
+def _outbound_payload(flights: list[dict]) -> dict:
+    """Call-1 payload: best_flights with departure_token on each option."""
     best = []
-    for (oa, od, oa_arr, odr, price, ra, rd, ra_arr, rdr) in pairs:
+    for f in flights:
         best.append({
-            "flights": [{"airline": oa,
-                         "departure_airport": {"time": od},
-                         "arrival_airport": {"time": oa_arr}}],
-            "total_duration": odr,
-            "price": price,
-            "return_flights": {
-                "flights": [{"airline": ra,
-                             "departure_airport": {"time": rd},
-                             "arrival_airport": {"time": ra_arr}}],
-                "total_duration": rdr,
-            },
+            "flights": [
+                {
+                    "airline": f["airline"],
+                    "departure_airport": {"time": f["dep"]},
+                    "arrival_airport": {"time": f["arr"]},
+                }
+            ],
+            "total_duration": f.get("dur", 90),
+            "price": f.get("price"),
+            "departure_token": f.get("token", "tok_abc"),
         })
     return {"best_flights": best, "other_flights": []}
 
 
-def _mock_rt(api: LiveTravelAPIs, payload: dict):
-    """Monkeypatch the requests.get call for the round-trip search."""
-    import unittest.mock as mock
-    fake_resp = mock.MagicMock()
-    fake_resp.status_code = 200
-    fake_resp.json.return_value = payload
-    fake_resp.raise_for_status = mock.MagicMock()
-    return mock.patch("tools.live_apis.requests.get", return_value=fake_resp)
+def _return_payload(flights: list[dict]) -> dict:
+    """Call-2 payload: best_flights for return legs (no departure_token)."""
+    best = []
+    for f in flights:
+        best.append({
+            "flights": [
+                {
+                    "airline": f["airline"],
+                    "departure_airport": {"time": f["dep"]},
+                    "arrival_airport": {"time": f["arr"]},
+                }
+            ],
+            "total_duration": f.get("dur", 90),
+        })
+    return {"best_flights": best, "other_flights": []}
 
 
-# ── flight_search_round_trip parsing ─────────────────────────────────────────
+def _mock_two_calls(payload1: dict, payload2: dict):
+    """Return a context manager that yields different payloads for call 1 and call 2."""
+    def _make_resp(data: dict):
+        r = mock.MagicMock()
+        r.status_code = 200
+        r.json.return_value = data
+        r.raise_for_status = mock.MagicMock()
+        return r
 
-def test_round_trip_search_returns_paired_options():
+    responses = [_make_resp(payload1), _make_resp(payload2)]
+    return mock.patch("tools.live_apis.requests.get", side_effect=responses)
+
+
+# ── Basic round-trip parsing ──────────────────────────────────────────────────
+
+def test_round_trip_search_returns_paired_strings():
     api = LiveTravelAPIs(serpapi_api_key="fake")
-    payload = _rt_payload([
-        ("Delta", "2026-05-01 08:00", "2026-05-01 09:30", 90, 350,
-         "Delta", "2026-05-03 17:00", "2026-05-03 18:30", 90),
+    p1 = _outbound_payload([
+        {"airline": "Delta", "dep": "2026-05-01 08:00", "arr": "2026-05-01 09:30",
+         "dur": 90, "price": 350, "token": "tok1"},
     ])
-    with _mock_rt(api, payload):
+    p2 = _return_payload([
+        {"airline": "Delta", "dep": "2026-05-03 17:00", "arr": "2026-05-03 18:30", "dur": 90},
+    ])
+    with _mock_two_calls(p1, p2):
         out_strs, ret_strs = api.flight_search_round_trip("JFK", "ATL", "2026-05-01", "2026-05-03")
     assert len(out_strs) == 1
     assert len(ret_strs) == 1
@@ -59,85 +78,104 @@ def test_round_trip_search_returns_paired_options():
 
 def test_round_trip_cost_attributed_to_day_1_only():
     api = LiveTravelAPIs(serpapi_api_key="fake")
-    payload = _rt_payload([
-        ("WN", "2026-05-01 09:00", "2026-05-01 10:15", 75, 280,
-         "WN", "2026-05-03 16:00", "2026-05-03 17:15", 75),
+    p1 = _outbound_payload([
+        {"airline": "WN", "dep": "2026-05-01 09:00", "arr": "2026-05-01 10:15",
+         "dur": 75, "price": 280, "token": "tok2"},
     ])
-    with _mock_rt(api, payload):
+    p2 = _return_payload([
+        {"airline": "WN", "dep": "2026-05-03 16:00", "arr": "2026-05-03 17:15", "dur": 75},
+    ])
+    with _mock_two_calls(p1, p2):
         out_strs, ret_strs = api.flight_search_round_trip("NYC", "DAL", "2026-05-01", "2026-05-03")
-    # Outbound should have "Cost: $280"
     assert "Cost: $280" in out_strs[0]
 
 
 def test_round_trip_return_leg_has_no_cost_fragment():
     api = LiveTravelAPIs(serpapi_api_key="fake")
-    payload = _rt_payload([
-        ("AA", "2026-05-01 07:00", "2026-05-01 09:00", 120, 400,
-         "AA", "2026-05-03 15:00", "2026-05-03 17:00", 120),
+    p1 = _outbound_payload([
+        {"airline": "AA", "dep": "2026-05-01 07:00", "arr": "2026-05-01 09:00",
+         "dur": 120, "price": 400, "token": "tok3"},
     ])
-    with _mock_rt(api, payload):
+    p2 = _return_payload([
+        {"airline": "AA", "dep": "2026-05-03 15:00", "arr": "2026-05-03 17:00", "dur": 120},
+    ])
+    with _mock_two_calls(p1, p2):
         out_strs, ret_strs = api.flight_search_round_trip("NYC", "LAX", "2026-05-01", "2026-05-03")
-    # Return should NOT have a Cost fragment
     assert "Cost:" not in ret_strs[0]
 
 
 def test_round_trip_falls_back_on_serpapi_error():
     api = LiveTravelAPIs(serpapi_api_key="fake")
-    import unittest.mock as mock
     with mock.patch("tools.live_apis.requests.get", side_effect=Exception("timeout")):
         with pytest.raises(RuntimeError, match="round-trip"):
             api.flight_search_round_trip("JFK", "LAX", "2026-05-01", "2026-05-03")
 
 
-def test_round_trip_falls_back_when_empty_results():
+def test_round_trip_falls_back_when_no_departure_token():
+    """Call 1 returns options with no departure_token → error."""
     api = LiveTravelAPIs(serpapi_api_key="fake")
-    payload = {"best_flights": [], "other_flights": []}
-    with _mock_rt(api, payload):
-        with pytest.raises(RuntimeError, match="no paired"):
+    # Options without departure_token are silently dropped; all dropped → error
+    p1 = {"best_flights": [
+        {"flights": [{"airline": "DL",
+                      "departure_airport": {"time": "2026-05-01 08:00"},
+                      "arrival_airport": {"time": "2026-05-01 09:30"}}],
+         "total_duration": 90, "price": 300}
+        # No "departure_token" field
+    ], "other_flights": []}
+    p2 = _return_payload([
+        {"airline": "DL", "dep": "2026-05-03 17:00", "arr": "2026-05-03 18:30"},
+    ])
+    with _mock_two_calls(p1, p2):
+        with pytest.raises(RuntimeError, match="departure_token"):
             api.flight_search_round_trip("JFK", "LAX", "2026-05-01", "2026-05-03")
 
 
 def test_round_trip_late_return_preference():
-    """prefer_late_return=True should prefer the 17:00 return over 08:00."""
+    """prefer_late_return=True picks the 17:00 return option over 08:00."""
     api = LiveTravelAPIs(serpapi_api_key="fake")
-    payload = _rt_payload([
-        ("DL", "2026-05-01 08:00", "2026-05-01 09:30", 90, 300,
-         "DL", "2026-05-03 08:00", "2026-05-03 09:30", 90),  # early return
-        ("WN", "2026-05-01 09:00", "2026-05-01 10:30", 90, 310,
-         "WN", "2026-05-03 17:00", "2026-05-03 18:30", 90),  # late return
+    p1 = _outbound_payload([
+        {"airline": "DL", "dep": "2026-05-01 08:00", "arr": "2026-05-01 09:30",
+         "dur": 90, "price": 300, "token": "tok4"},
     ])
-    with _mock_rt(api, payload):
+    # Return payload has two options: early and late
+    p2 = {"best_flights": [
+        {"flights": [{"airline": "DL",
+                      "departure_airport": {"time": "2026-05-03 08:00"},
+                      "arrival_airport": {"time": "2026-05-03 09:30"}}],
+         "total_duration": 90},
+        {"flights": [{"airline": "WN",
+                      "departure_airport": {"time": "2026-05-03 17:00"},
+                      "arrival_airport": {"time": "2026-05-03 18:30"}}],
+         "total_duration": 90},
+    ], "other_flights": []}
+    with _mock_two_calls(p1, p2):
         _out, ret_strs = api.flight_search_round_trip(
             "JFK", "ATL", "2026-05-01", "2026-05-03", prefer_late_return=True
         )
-    # Late-return pair should be first
     assert "17:00" in ret_strs[0]
 
 
-def test_round_trip_respects_duration_cap_on_both_legs():
-    """Duration cap filters long-haul pairs; when multiple options exist, short ones win.
-
-    The cap skips when it would empty the pool (plan design: better a long
-    flight than no result). So we test filtering by providing both a short and
-    a long pair — only the short one should survive.
-    """
+def test_round_trip_respects_duration_cap_on_outbound():
+    """Duration cap filters long outbound options; short one wins."""
     api = LiveTravelAPIs(serpapi_api_key="fake")
-    # JFK→BOS: cap=180 min.
-    payload = _rt_payload([
-        ("DL", "2026-05-01 08:00", "2026-05-01 09:00", 60, 200,  # 60-min outbound — passes
-         "DL", "2026-05-03 17:00", "2026-05-03 18:00", 60),
-        ("AA", "2026-05-01 06:00", "2026-05-01 11:00", 300, 100,  # 300-min outbound — filtered
-         "AA", "2026-05-03 17:00", "2026-05-03 22:00", 90),
+    # JFK→BOS: cap ≈180 min.
+    p1 = _outbound_payload([
+        {"airline": "DL", "dep": "2026-05-01 08:00", "arr": "2026-05-01 09:00",
+         "dur": 60, "price": 200, "token": "tok_short"},
+        {"airline": "AA", "dep": "2026-05-01 06:00", "arr": "2026-05-01 11:00",
+         "dur": 300, "price": 100, "token": "tok_long"},  # too long
     ])
-    with _mock_rt(api, payload):
-        out_strs, ret_strs = api.flight_search_round_trip(
+    p2 = _return_payload([
+        {"airline": "DL", "dep": "2026-05-03 17:00", "arr": "2026-05-03 18:00", "dur": 60},
+    ])
+    with _mock_two_calls(p1, p2):
+        out_strs, _ret = api.flight_search_round_trip(
             "JFK", "BOS", "2026-05-01", "2026-05-03",
             dep_id="JFK", arr_id="BOS",
         )
-    # Only the 60-min DL pair should survive the cap
-    assert len(out_strs) == 1
+    # The winner outbound should be the short (60-min) flight
     assert "DL" in out_strs[0]
-    assert "09:00" in out_strs[0]  # arrival of the short flight
+    assert "09:00" in out_strs[0]
 
 
 # ── missing_cost rule with round-trip flag ────────────────────────────────────
@@ -160,7 +198,6 @@ def test_verifier_missing_cost_skips_last_day_when_round_trip():
     ])
     report = verify(plan, intent, flights_round_trip=True)
     missing_cost_v = [v for v in report.violations if v.rule == "missing_cost"]
-    # The last-day transport missing cost should NOT fire
     assert not any("day(s)" in v.detail and "2" in v.detail for v in missing_cost_v)
 
 

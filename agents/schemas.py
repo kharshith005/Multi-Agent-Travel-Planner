@@ -30,6 +30,32 @@ class Intent(BaseModel):
     def _dates_none_to_empty(cls, v):
         return v or []
 
+    @field_validator("cuisine", "house_rule", "room_type", "transportation", mode="before")
+    @classmethod
+    def _coerce_list_to_str(cls, v):
+        if v is None or v == "":
+            return None
+        if isinstance(v, (list, tuple)):
+            return ", ".join(str(x) for x in v if x and str(x).strip()) or None
+        return v
+
+    def for_specialist(self, name: str) -> dict:
+        """Return only the Intent fields relevant to the named specialist.
+
+        Reduces input-token usage by ~80–150 tokens per call by omitting
+        fields the specialist never reads (e.g. cuisine is irrelevant to lodging).
+        """
+        base = {"dest": self.dest, "days": self.days, "dates": self.dates, "budget": self.budget}
+        if name == "transport":
+            return {**base, "org": self.org, "transportation": self.transportation}
+        if name == "lodging":
+            return {**base, "people": self.people, "house_rule": self.house_rule, "room_type": self.room_type}
+        if name == "dining":
+            return {**base, "people": self.people, "cuisine": self.cuisine}
+        if name == "sightseeing":
+            return {**base, "people": self.people}
+        return self.model_dump()
+
 
 class DayTransport(BaseModel):
     day: int
@@ -248,3 +274,27 @@ class ToolContext(TypedDict, total=False):
     meal_cost_targets: dict[int, int]  # price_level → estimated meal cost
     lodging_cost_targets: dict[int, int]  # price_level → estimated nightly cost
     transport_one_way_target: int      # one-way flight budget target
+
+
+class ToolContextSchema(BaseModel):
+    """Pydantic mirror of ToolContext for contract validation.
+
+    Used by tests to assert that both the sandbox and live research paths
+    produce a dict that satisfies the ToolContext shape.
+    Call ToolContextSchema.model_validate(ctx) — raises ValidationError if not.
+    """
+    model_config = {"extra": "allow"}
+
+    flights_outbound: list[str] = Field(default_factory=list)
+    flights_return: list[str] = Field(default_factory=list)
+    flights_round_trip: bool = False
+    route_drive: Optional[str] = None
+    route_taxi: Optional[str] = None
+    hotels: list[dict] = Field(default_factory=list)
+    restaurants: list[dict] = Field(default_factory=list)
+    attractions: list[dict] = Field(default_factory=list)
+    trip_windows: Optional[dict] = None
+    category_caps: dict[str, int] = Field(default_factory=dict)
+    meal_cost_targets: dict = Field(default_factory=dict)
+    lodging_cost_targets: dict = Field(default_factory=dict)
+    transport_one_way_target: Optional[int] = None

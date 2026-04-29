@@ -29,7 +29,38 @@ def test_registry_gemini_entries():
 
 def test_registry_claude_entries():
     claude = [m for m in REGISTRY if m.provider == "claude"]
-    assert len(claude) >= 1
+    assert len(claude) >= 3  # Haiku 4.5, Sonnet 4.5, Sonnet 4.6
+
+def test_registry_has_haiku_45():
+    m = get_model("claude-haiku-4-5")
+    assert m.tier == "lite"
+    assert m.est_relative_cost == 12.0
+
+def test_registry_has_sonnet_45():
+    m = get_model("claude-sonnet-4-5")
+    assert m.tier == "standard"
+    assert m.est_relative_cost == 37.0
+
+def test_registry_has_sonnet_46():
+    m = get_model("claude-sonnet-4-6")
+    assert m.tier == "standard"
+    assert m.est_relative_cost == 37.0
+
+def test_registry_available_regions_field():
+    haiku = get_model("claude-haiku-4-5")
+    assert "global" in haiku.available_regions
+    sonnet = get_model("claude-sonnet-4-6")
+    assert "global" in sonnet.available_regions
+
+def test_registry_latency_field():
+    haiku = get_model("claude-haiku-4-5")
+    assert haiku.est_latency_ms_per_call < 1000  # haiku is faster than sonnet
+    sonnet = get_model("claude-sonnet-4-6")
+    assert sonnet.est_latency_ms_per_call >= 1000
+
+def test_registry_gemini_no_region_restriction():
+    m = get_model("gemini-2.5-flash-lite")
+    assert m.available_regions == ()  # no restriction
 
 
 # ── get_model ────────────────────────────────────────────────────────────────

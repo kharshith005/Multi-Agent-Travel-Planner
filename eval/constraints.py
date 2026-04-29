@@ -73,6 +73,25 @@ def _names(text: str) -> list[str]:
     return names
 
 
+def _has_valid_route(city1: str, city2: str, sandbox: Sandbox) -> bool:
+    """True when the transition between two cities is feasible.
+
+    Fails only when driving is *explicitly* "No valid information" AND no
+    flight exists for this city pair. A missing entry (None) means the pair
+    wasn't sampled — we can't infer infeasibility, so we pass by default.
+    """
+    if city1 == city2:
+        return True
+    # If any flight exists on any date for this pair → feasible.
+    if any(k[0] == city1 and k[1] == city2 for k in sandbox.flights):
+        return True
+    route = sandbox.distance_matrix(city1, city2, "driving")
+    # None → no data; don't penalise. Explicit "No valid information." → infeasible.
+    if route is None:
+        return True
+    return "no valid" not in route.lower()
+
+
 def evaluate(plan: FullPlan, intent: Intent, sandbox: Sandbox) -> ConstraintReport:
     cs: dict[str, bool] = {}
     hc: dict[str, bool] = {}
@@ -93,35 +112,90 @@ def evaluate(plan: FullPlan, intent: Intent, sandbox: Sandbox) -> ConstraintRepo
     cs["diverse_attractions"] = len(attrs) == len(set(attrs))
     cs["diverse_restaurants"] = len(rests) == len(set(rests))
 
-    # ---- within sandbox ----
+    # ---- within sandbox (single key = paper Table 1) ----
     known_attr = {r.get("Name") for rs in sandbox.attractions.values() for r in rs}
     known_rest = {r.get("Name") for rs in sandbox.restaurants.values() for r in rs}
     known_acc = {r.get("NAME") for rs in sandbox.accommodations.values() for r in rs}
-    cs["within_sandbox_attractions"] = all(n in known_attr for n in attrs) if attrs else True
-    cs["within_sandbox_restaurants"] = all(n in known_rest for n in rests) if rests else True
     acc_names: list[str] = []
     for d in plan.plan:
         acc_names.extend(_names(d.accommodation))
-    cs["within_sandbox_accommodations"] = (
-        all(n in known_acc for n in acc_names) if acc_names else True
+    cs["within_sandbox"] = (
+        (all(n in known_attr for n in attrs) if attrs else True)
+        and (all(n in known_rest for n in rests) if rests else True)
+        and (all(n in known_acc for n in acc_names) if acc_names else True)
     )
 
-    # ---- min nights & accommodation continuity ----
-    # On inner days (not last), accommodation must not be '-'
-    cs["min_nights"] = all(
-        (d.accommodation and d.accommodation != "-") or d.days == intent.days
-        for d in plan.plan
+    # ---- within current city ----
+    # Venues must be in the destination city for every day. All days in our
+    # single-destination planner are at intent.dest (day-1 and last-day travel
+    # legs start/end there; activities are always at dest).
+    dest_attr_names = {r.get("Name") for r in sandbox.attraction_search(intent.dest)}
+    dest_rest_names = {r.get("Name") for r in sandbox.restaurant_search(intent.dest)}
+    cs["within_current_city"] = (
+        (all(n in dest_attr_names for n in attrs) if attrs else True)
+        and (all(n in dest_rest_names for n in rests) if rests else True)
     )
+
+    # ---- reasonable city route ----
+    # Every explicit city transition in current_city strings must be feasible.
+    # "from X to Y" format identifies inter-city legs; same-city days are fine.
+    route_ok = True
+    for d in plan.plan:
+        cc = d.current_city
+        if cc.startswith("from ") and " to " in cc:
+            parts = cc.split(" to ", 1)
+            from_city = parts[0][5:].strip()
+            to_city = parts[1].strip()
+            if not _has_valid_route(from_city, to_city, sandbox):
+                route_ok = False
+                break
+    cs["reasonable_city_route"] = route_ok
+
+    # ---- min nights (paper: consecutive nights must meet hotel minimum) ----
+    stay_names = [_names(d.accommodation)[0] if _names(d.accommodation) else "" for d in plan.plan]
+    min_nights_ok = True
+    i = 0
+    while i < len(stay_names):
+        name = stay_names[i]
+        if not name:
+            i += 1
+            continue
+        j = i
+        while j < len(stay_names) and stay_names[j] == name:
+            j += 1
+        nights = j - i
+        min_req = 1
+        for rows in sandbox.accommodations.values():
+            for r in rows:
+                if r.get("NAME") == name:
+                    try:
+                        min_req = int(r.get("minimum nights", 1))
+                    except (TypeError, ValueError):
+                        min_req = 1
+                    break
+            else:
+                continue
+            break
+        if nights < min_req:
+            min_nights_ok = False
+            break
+        i = j
+    cs["min_nights"] = min_nights_ok
 
     # ---- non-conflicting transportation ----
-    # Day 1 and last day have inter-city transport; middle days should not
-    # mix flight with self-driving in the same day.
+    # Per-day: no single day mixes "flight" and "self-driving".
+    # Trip-level: flight and self-driving are mutually exclusive across the trip.
     ok = True
-    for d in plan.plan:
-        t = d.transportation.lower()
-        if "flight" in t and ("self-driving" in t or "driving" in t):
+    trans_lower = [d.transportation.lower() for d in plan.plan]
+    for t in trans_lower:
+        if "flight" in t and "self-driving" in t:
             ok = False
             break
+    if ok:
+        has_flight = any("flight" in t for t in trans_lower)
+        has_selfdriving = any("self-driving" in t for t in trans_lower)
+        if has_flight and has_selfdriving:
+            ok = False
     cs["non_conflicting_transport"] = ok
 
     # ---- HARD CONSTRAINTS ----
@@ -143,9 +217,6 @@ def evaluate(plan: FullPlan, intent: Intent, sandbox: Sandbox) -> ConstraintRepo
     # room_type
     if intent.room_type:
         rt = intent.room_type.lower()
-        acc_blob = " ".join(d.accommodation for d in plan.plan).lower()
-        # plan text often only contains the accom name; as a lenient proxy, require
-        # the room-type keyword to appear somewhere — captured via sandbox lookup:
         matched = False
         for name in acc_names:
             for rows in sandbox.accommodations.values():

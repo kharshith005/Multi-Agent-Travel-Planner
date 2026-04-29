@@ -22,11 +22,22 @@ class ModelEntry:
     default_temperature: float
     est_relative_cost: float  # relative to gemini-2.5-flash-lite = 1.0
     auth_mode: str           # "vertex_api_key" | "vertex_adc"
+    available_regions: tuple[str, ...] = ()   # empty = no regional restriction
+    est_latency_ms_per_call: int = 1000       # rough per-call latency estimate
 
 
 # Registry — exact GA model IDs pinned per Phase 0 checklist.
 # Claude IDs follow Vertex AI Model Garden format: <model>@<revision>.
 # GPT/OpenAI is excluded: Vertex AI does not host OpenAI models (see ARCHITECTURE.md §4.3).
+#
+# Cost calibration (relative to gemini-2.5-flash-lite ≈ $0.10/1M input tokens):
+#   Gemini 2.0 Flash       ~$0.25/M  → 2.5×
+#   Gemini 2.5 Flash-Lite  ~$0.10/M  → 1.0× (baseline)
+#   Gemini 2.5 Flash       ~$0.40/M  → 4.0×
+#   Claude Haiku 4.5       ~$0.80/M  → 8.0× (input); output 5× pricier — blended ≈ 12×
+#   Claude Sonnet 4.5/4.6  ~$3.00/M  → 30× (input); output 5× pricier — blended ≈ 37×
+# Claude models require GOOGLE_CLOUD_PROJECT + CLAUDE_VERTEX_REGION=global (ADC auth).
+# region="global" uses Anthropic's pooled Vertex endpoint with higher token quota.
 REGISTRY: list[ModelEntry] = [
     ModelEntry(
         id="gemini-2.5-flash-lite",
@@ -37,6 +48,7 @@ REGISTRY: list[ModelEntry] = [
         default_temperature=0.0,
         est_relative_cost=1.0,
         auth_mode="vertex_api_key",
+        est_latency_ms_per_call=600,
     ),
     ModelEntry(
         id="gemini-2.5-flash",
@@ -47,16 +59,7 @@ REGISTRY: list[ModelEntry] = [
         default_temperature=0.0,
         est_relative_cost=4.0,
         auth_mode="vertex_api_key",
-    ),
-    ModelEntry(
-        id="gemini-2.0-flash-lite",
-        display_name="Gemini 2.0 Flash-Lite",
-        provider="gemini",
-        tier="lite",
-        family="gemini-2.0",
-        default_temperature=0.0,
-        est_relative_cost=0.7,
-        auth_mode="vertex_api_key",
+        est_latency_ms_per_call=900,
     ),
     ModelEntry(
         id="gemini-2.0-flash",
@@ -67,6 +70,7 @@ REGISTRY: list[ModelEntry] = [
         default_temperature=0.0,
         est_relative_cost=2.5,
         auth_mode="vertex_api_key",
+        est_latency_ms_per_call=700,
     ),
     ModelEntry(
         id="claude-haiku-4-5@20251001",
@@ -75,8 +79,22 @@ REGISTRY: list[ModelEntry] = [
         tier="lite",
         family="claude-4",
         default_temperature=0.0,
-        est_relative_cost=3.0,
+        est_relative_cost=12.0,
         auth_mode="vertex_adc",
+        available_regions=("global",),
+        est_latency_ms_per_call=500,
+    ),
+    ModelEntry(
+        id="claude-sonnet-4-5@20250929",
+        display_name="Claude Sonnet 4.5",
+        provider="claude",
+        tier="standard",
+        family="claude-4",
+        default_temperature=0.0,
+        est_relative_cost=37.0,
+        auth_mode="vertex_adc",
+        available_regions=("global",),
+        est_latency_ms_per_call=1200,
     ),
     ModelEntry(
         id="claude-sonnet-4-6@20251101",
@@ -85,12 +103,14 @@ REGISTRY: list[ModelEntry] = [
         tier="standard",
         family="claude-4",
         default_temperature=0.0,
-        est_relative_cost=12.0,
+        est_relative_cost=37.0,
         auth_mode="vertex_adc",
+        available_regions=("global",),
+        est_latency_ms_per_call=1200,
     ),
 ]
 
-_REGISTRY_BY_ID: dict[str, ModelEntry] = {m.id: m for m in REGISTRY}
+_REGISTRY_BY_ID: dict[str, ModelEntry] = {m.id.split("@", 1)[0]: m for m in REGISTRY}
 
 
 def get_model(model_id: str) -> ModelEntry:

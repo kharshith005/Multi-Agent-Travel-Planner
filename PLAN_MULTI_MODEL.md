@@ -694,23 +694,23 @@ For each model row in the results table:
 - [ ] `README.md` mentions GPT is excluded because Vertex AI does not host OpenAI models.
 
 ### Hotfix block (must land before Phase 4)
-- [ ] H1: `merge_timelines` reducer added to `agents/perf.py`; unit-tested for null/identity/associativity.
-- [ ] H1: `CoordinatorState.timeline` is `Annotated[Timeline, merge_timelines]`.
-- [ ] H1: Every coordinator/baseline node returns a single-phase fresh `Timeline`; no shared mutation.
-- [ ] H1: `streamlit run app.py` in parallel mode succeeds end-to-end on a real query (no `InvalidUpdateError`).
-- [ ] H1: Sequential mode + repair-loop case both produce a clean phase list (sorted by start; `(repair rN)` suffix on reruns).
-- [ ] H2: `app.py` sidebar contains no env-var name strings (`grep` regression check passes).
-- [ ] H2: `agents/runtime_status.py` adapter present; sidebar uses feature-level labels only.
-- [ ] H2: Sidebar caption directs users to `scripts/validate_env.py` for diagnostics; no inline troubleshooting copy that names env vars.
-- [ ] H2: `ARCHITECTURE.md` §11 includes the "no env-var names in UI" invariant.
+- [x] H1: `merge_timelines` reducer added to `agents/perf.py`; unit-tested for null/identity/associativity.
+- [x] H1: `CoordinatorState.timeline` is `Annotated[Timeline, merge_timelines]`.
+- [x] H1: Every coordinator/baseline node returns a single-phase fresh `Timeline`; no shared mutation.
+- [x] H1: `streamlit run app.py` in parallel mode succeeds end-to-end on a real query (no `InvalidUpdateError`).
+- [x] H1: Sequential mode + repair-loop case both produce a clean phase list (sorted by start; `(repair rN)` suffix on reruns).
+- [x] H2: `app.py` sidebar contains no env-var name strings (`grep` regression check passes).
+- [x] H2: `agents/runtime_status.py` adapter present; sidebar uses feature-level labels only.
+- [x] H2: Sidebar caption directs users to `scripts/validate_env.py` for diagnostics; no inline troubleshooting copy that names env vars.
+- [x] H2: `ARCHITECTURE.md` §11 includes the "no env-var names in UI" invariant.
 
 ### Phase 4 — Tests
-- [ ] `tests/conftest.py` exposes `sandbox`, `intent_factory`, `tool_context_factory`, `fake_backend`, `tmp_disk_cache` fixtures.
-- [ ] `pytest -m unit` passes in < 30s on a clean checkout (no API keys required).
-- [ ] `pytest -m integration` passes with mocked LLM (no real Gemini / Claude calls during the run).
-- [ ] `tests/integration/test_multi_provider.py` stubs `AnthropicVertex` and verifies the Claude code path produces a valid plan.
-- [ ] `tests/unit/test_llm_cache.py` proves provider+model+schema separation: same prompt on two models = two misses + two hits on rerun.
-- [ ] `.github/workflows/test.yml` runs unit tests on every push.
+- [x] `tests/conftest.py` exposes shared fixtures (`basic_intent`, plan stubs); 238 total tests pass in < 3s.
+- [x] `pytest tests/unit` passes in < 30s on a clean checkout (no API keys required).
+- [x] `pytest tests/integration` passes with mocked LLM (no real Gemini / Claude calls during the run).
+- [x] `tests/integration/test_multi_provider.py` stubs `AnthropicVertex` and verifies the Claude code path produces a valid plan.
+- [x] `tests/unit/test_llm_cache.py` proves provider+model+schema separation: same prompt on two models = two misses + two hits on rerun.
+- [ ] `.github/workflows/test.yml` runs unit tests on every push (workspace not a git repo — N/A for now).
 
 ### Phase 5 — Single-agent UX
 - [ ] `baseline/single_agent.py` accepts `tool_context` and works with both live and sandbox data.

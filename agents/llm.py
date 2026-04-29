@@ -129,7 +129,7 @@ def _cache_put(key: str, value: str, *, _write_disk: bool = True) -> None:
 
 # ── retry ─────────────────────────────────────────────────────────────────────
 
-_MAX_ATTEMPTS = 6
+_MAX_ATTEMPTS = 3
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 _RETRY_HINTS = (
     "rate_limit",
@@ -163,7 +163,7 @@ def _parse_retry_after(exc: Exception) -> float | None:
 
 
 def _backoff(attempt: int) -> float:
-    return min(2 ** attempt, 45) + random.uniform(0, 0.75)
+    return min(2 ** attempt, 12) + random.uniform(0, 0.75)
 
 
 def _with_retry(fn, *, max_attempts: int = _MAX_ATTEMPTS):
@@ -188,11 +188,8 @@ def _active_model() -> str:
 
 
 def _provider_for(model_id: str) -> str:
-    try:
-        from agents.models import get_model
-        return get_model(model_id).provider
-    except KeyError:
-        return "gemini"
+    from agents.models import get_model
+    return get_model(model_id).provider
 
 
 # ── public API ────────────────────────────────────────────────────────────────
@@ -256,11 +253,7 @@ def call_json(
     def do_call() -> str:
         from agents.providers import call_provider
         from agents.models import get_model
-        try:
-            model_entry = get_model(model_id)
-        except KeyError:
-            from agents.models import REGISTRY
-            model_entry = REGISTRY[0]  # fallback to default
+        model_entry = get_model(model_id)
 
         if provider == "claude":
             text, in_tok, out_tok = call_provider(
@@ -300,15 +293,10 @@ def call_json(
 def call_text(system: str, user: str, *, max_tokens: int = 2048) -> str:
     """Unstructured call for the single-agent baseline's ReAct loop."""
     model_id = _active_model()
-    provider = _provider_for(model_id)
 
     from agents.providers import call_provider
     from agents.models import get_model
-    try:
-        model_entry = get_model(model_id)
-    except KeyError:
-        from agents.models import REGISTRY
-        model_entry = REGISTRY[0]
+    model_entry = get_model(model_id)
 
     def do_call() -> str:
         text, in_tok, out_tok = call_provider(

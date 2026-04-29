@@ -44,7 +44,6 @@ from .schemas import (
     VerifierReport,
 )
 from tools.live_apis import default_live_apis
-from tools.sandbox import default_sandbox
 
 
 def _call_live(fn, *args, skip_key: str = "", **kwargs):
@@ -74,7 +73,9 @@ INTENT_SYSTEM = (
     "cuisine, room_type, transportation. Use null when a field is not mentioned. "
     "The trip is always to a single destination city.\n"
     "IMPORTANT: If the user did NOT state an unambiguous trip START date, return "
-    "an empty `dates` list. Do not guess a start date. Do not use today's date."
+    "an empty `dates` list. Do not guess a start date. Do not use today's date.\n"
+    "IMPORTANT: When multiple cuisines, room rules, or transportation modes are "
+    "mentioned, return them as a single comma-separated string — never as an array."
 )
 
 
@@ -201,6 +202,26 @@ _HHMM_BEFORE_ARROW = _re.compile(r"(\d{1,2}):(\d{2})\s*->")
 _PRICE_LEVEL_MAP = {0: 8, 1: 15, 2: 28, 3: 45, 4: 70}
 _COST_SEGMENT_RE = _re.compile(r";\s*Cost[:\s][^;]*", flags=_re.IGNORECASE)
 _DRIVE_DISTANCE_RE = _re.compile(r"Distance:\s*([0-9]+(?:\.[0-9]+)?)\s*mi", _re.IGNORECASE)
+_DRIVE_LEG_HEAD_RE = _re.compile(r"^Drive\s+(\d+)\s+mi\s+to\s+([A-Z]{3})", _re.IGNORECASE)
+
+
+def _reverse_drive_leg(drive_leg: str | None, target_city: str) -> str | None:
+    """Turn 'Drive N mi to IATA; route' into 'Drive N mi from IATA to city'.
+
+    Used to surface the drive-from-airport leg after the flight on the same
+    day, mirroring how the drive-to-airport leg is shown before the flight.
+    """
+    if not drive_leg:
+        return None
+    m = _DRIVE_LEG_HEAD_RE.match(drive_leg)
+    if not m:
+        return None
+    return f"Drive {m.group(1)} mi from {m.group(2)} to {target_city}"
+
+
+def _compose_flight_segments(*segments: str | None) -> str:
+    """Join non-empty drive/flight/drive segments with '; ' separators."""
+    return "; ".join(s for s in segments if s)
 
 
 def _parse_drive_distance(route_drive: str | None) -> float | None:
@@ -231,54 +252,25 @@ def _fmt_time(minutes: int) -> str:
     return f"{minutes // 60:02d}:{minutes % 60:02d}"
 
 
-def _sandbox_fallback(city: str, kind: str, limit: int = 12) -> list[dict]:
-    """Return sandbox rows for `city` shaped like Google Places results.
+def derive_trip_windows(
+    flights_outbound: list[str],
+    flights_return: list[str],
+) -> dict:
+    """Derive TripWindows from pre-fetched flight strings without an LLM call.
 
-    Used when the live Google Places API returns nothing for a valid city so
-    planning can still proceed with reasonable venue data instead of failing
-    the whole query (which would collapse delivery_rate).
+    Parses the first outbound flight's arrival time and the first return
+    flight's departure time — the same values transport specialist produces
+    by picking ranked[0]. Called by the research node so all four specialists
+    can run in parallel with timing context already populated.
     """
-    try:
-        sb = default_sandbox("frozen")
-    except Exception:
-        return []
-
-    if kind == "hotels":
-        rows = sb.accommodations.get(city, [])
-        out: list[dict] = []
-        for r in rows[:limit]:
-            out.append({
-                "name": r.get("NAME"),
-                "rating": r.get("review rate number"),
-                "address": f"{city}",
-                "price_level": 2,
-            })
-        return [r for r in out if r["name"]]
-
-    if kind == "restaurants":
-        rows = sb.restaurants.get(city, [])
-        out = []
-        for r in rows[:limit]:
-            out.append({
-                "name": r.get("Name"),
-                "rating": r.get("Aggregate Rating"),
-                "address": f"{city}",
-                "price_level": 2,
-            })
-        return [r for r in out if r["name"]]
-
-    if kind == "attractions":
-        rows = sb.attractions.get(city, [])
-        out = []
-        for r in rows[:limit]:
-            out.append({
-                "name": r.get("Name"),
-                "rating": None,
-                "address": f"{r.get('City') or city}",
-            })
-        return [r for r in out if r["name"]]
-
-    return []
+    arr = _extract_arrival_minutes(flights_outbound[0]) if flights_outbound else None
+    dep = _extract_departure_minutes(flights_return[0]) if flights_return else None
+    return {
+        "arrival_minutes_day1": arr,
+        "departure_minutes_last": dep,
+        "arrival_hhmm_day1": _fmt_time(arr) if arr is not None else None,
+        "departure_hhmm_last": _fmt_time(dep) if dep is not None else None,
+    }
 
 
 def _merge_trip_windows(
@@ -351,21 +343,19 @@ def _apply_timing_adjustments(plan: FullPlan, tool_context: ToolContext | None) 
 
     # ── Day 1: arrival-day timing safety clamp ────────────────────────────────
     # Specialists should have obeyed the YES/NO grid; this clamp fires only
-    # when a specialist disregarded it (defense-in-depth).
+    # when a specialist disregarded it (defense-in-depth). Clamp values are
+    # always "-" so the transportation field stays the single source of truth
+    # for arrival/departure times (no echoed HH:MM in meal/attraction fields).
     day1 = days[0]
     arrival_min = _extract_arrival_minutes(day1.transportation)
     if arrival_min is not None:
         updates: dict = {}
-        arr = _fmt_time(arrival_min)
-        if arrival_min >= THRESH_D1_LUNCH_NO:
-            if day1.lunch and day1.lunch != "-":
-                updates["lunch"] = f"In transit (arrives {arr})"
-        if arrival_min >= THRESH_D1_ATTRACTION_NO:
-            if day1.attraction and day1.attraction != "-":
-                updates["attraction"] = "-"
-        if arrival_min >= THRESH_D1_DINNER_NO:
-            if day1.dinner and day1.dinner != "-":
-                updates["dinner"] = f"Late arrival {arr} — hotel dinner / room service recommended"
+        if arrival_min >= THRESH_D1_LUNCH_NO and day1.lunch and day1.lunch != "-":
+            updates["lunch"] = "-"
+        if arrival_min >= THRESH_D1_ATTRACTION_NO and day1.attraction and day1.attraction != "-":
+            updates["attraction"] = "-"
+        if arrival_min >= THRESH_D1_DINNER_NO and day1.dinner and day1.dinner != "-":
+            updates["dinner"] = "-"
         if updates:
             days[0] = day1.model_copy(update=updates)
 
@@ -381,10 +371,12 @@ def _apply_timing_adjustments(plan: FullPlan, tool_context: ToolContext | None) 
             elif dep_min < THRESH_LAST_LUNCH_YES:
                 updates["lunch"] = "-"
 
-            # Very late departure — restore dinner if specialist left it blank.
+            # Very late departure — restore dinner only when a real restaurant
+            # is available; otherwise leave as "-" (no echoed departure time).
             if dep_min >= THRESH_LAST_DINNER_YES and (not last.dinner or last.dinner == "-"):
                 choice = _pick_unused_restaurant(tool_context, used_restaurants)
-                updates["dinner"] = choice or f"Dinner before {_fmt_time(dep_min)} departure"
+                if choice:
+                    updates["dinner"] = choice
 
             if updates:
                 days[-1] = last.model_copy(update=updates)
@@ -409,8 +401,138 @@ def _run_specialist(
 
 
 def _should_run_specialist(state: CoordinatorState, name: str) -> bool:
-    rerun = state.get("rerun_specialists") or []
-    return not rerun or name in rerun
+    rerun = state.get("rerun_specialists")
+    # None = unset (first run) → run all specialists.
+    # [] = mechanical pre-repair resolved everything → skip LLM re-runs.
+    # [...] = explicit list → run only those named.
+    if rerun is None:
+        return True
+    return name in rerun
+
+
+def _mech_repair_dining(
+    dining_plan: "DiningPlan",
+    tool_context: "ToolContext",
+) -> "tuple[DiningPlan, bool]":
+    """Replace duplicate restaurant entries with unused ones from ToolContext.
+
+    Returns (patched_plan, True) when at least one duplicate was replaced;
+    (original_plan, False) when the plan is already duplicate-free or no
+    unused restaurants are available.
+    """
+    restaurants = (tool_context or {}).get("restaurants") or []
+    if not restaurants:
+        return dining_plan, False
+
+    meal_fields = ("breakfast", "lunch", "dinner")
+    assigned: set[str] = set()
+    seen_duplicates: list[tuple[int, str]] = []  # (day_no, field)
+
+    for day in sorted(dining_plan.days, key=lambda d: d.day):
+        for field in meal_fields:
+            text = getattr(day, field, "-") or "-"
+            if text == "-":
+                continue
+            name = text.split(",")[0].split(";")[0].strip().lower()
+            if not name:
+                continue
+            if name in assigned:
+                seen_duplicates.append((day.day, field))
+            else:
+                assigned.add(name)
+
+    if not seen_duplicates:
+        return dining_plan, False
+
+    unused = [r for r in restaurants if r.get("name") and r["name"].strip().lower() not in assigned]
+    if not unused:
+        return dining_plan, False
+
+    days_by_no = {d.day: d for d in dining_plan.days}
+    unused_iter = iter(unused)
+    patched = False
+
+    for day_no, field in seen_duplicates:
+        try:
+            r = next(unused_iter)
+        except StopIteration:
+            break
+        day = days_by_no.get(day_no)
+        if day is None:
+            continue
+        r_name = (r.get("name") or "").strip()
+        r_addr = r.get("address", "") or ""
+        r_city = r_addr.split(",")[-1].strip() if r_addr else ""
+        try:
+            r_cost = _PRICE_LEVEL_MAP.get(int(r.get("price_level", 2)), 28)
+        except (TypeError, ValueError):
+            r_cost = 28
+        new_text = f"{r_name}{', ' + r_city if r_city else ''}; Cost: ${r_cost}"
+        days_by_no[day_no] = day.model_copy(update={field: new_text})
+        assigned.add(r_name.lower())
+        patched = True
+
+    if not patched:
+        return dining_plan, False
+
+    return DiningPlan(days=[days_by_no[k] for k in sorted(days_by_no)]), True
+
+
+def _mech_repair_sightseeing(
+    sightseeing_plan: "SightseeingPlan",
+    tool_context: "ToolContext",
+) -> "tuple[SightseeingPlan, bool]":
+    """Replace duplicate attraction entries with unused ones from ToolContext."""
+    attractions = (tool_context or {}).get("attractions") or []
+    if not attractions:
+        return sightseeing_plan, False
+
+    assigned: set[str] = set()
+    seen_duplicates: list[int] = []  # day numbers with duplicate attractions
+
+    for day in sorted(sightseeing_plan.days, key=lambda d: d.day):
+        text = (day.description or "").strip()
+        if text == "-":
+            continue
+        name = text.split(",")[0].split(";")[0].strip().lower()
+        if not name:
+            continue
+        if name in assigned:
+            seen_duplicates.append(day.day)
+        else:
+            assigned.add(name)
+
+    if not seen_duplicates:
+        return sightseeing_plan, False
+
+    unused = [a for a in attractions if a.get("name") and a["name"].strip().lower() not in assigned]
+    if not unused:
+        return sightseeing_plan, False
+
+    days_by_no = {d.day: d for d in sightseeing_plan.days}
+    unused_iter = iter(unused)
+    patched = False
+
+    for day_no in seen_duplicates:
+        try:
+            a = next(unused_iter)
+        except StopIteration:
+            break
+        day = days_by_no.get(day_no)
+        if day is None:
+            continue
+        a_name = (a.get("name") or "").strip()
+        a_addr = a.get("address", "") or ""
+        a_city = a_addr.split(",")[-1].strip() if a_addr else ""
+        new_text = f"{a_name}{', ' + a_city if a_city else ''}"
+        days_by_no[day_no] = day.model_copy(update={"description": new_text})
+        assigned.add(a_name.lower())
+        patched = True
+
+    if not patched:
+        return sightseeing_plan, False
+
+    return SightseeingPlan(days=[days_by_no[k] for k in sorted(days_by_no)]), True
 
 
 def _build_graph(
@@ -464,7 +586,8 @@ def _build_graph(
             "intent": intent,
             "timeline": local_tl,
             "repair_notes": {},
-            "rerun_specialists": ["transport", "lodging", "dining", "sightseeing"],
+            # rerun_specialists is intentionally absent here: None means "run all"
+            # in _should_run_specialist. repair_prepare_node sets an explicit list.
             "repair_round": state.get("repair_round", 0),
         }
 
@@ -490,14 +613,20 @@ def _build_graph(
                 on_progress("Research: using pre-built tool context (sandbox eval mode)")
             with local_tl.phase("research"):
                 pass  # no live API calls; phase recorded for timing completeness
+            merged: dict = dict(state["tool_context"])
             if caps:
-                merged: dict = dict(state["tool_context"])
                 merged["category_caps"] = caps
                 merged["meal_cost_targets"] = budget.derive_meal_targets(intent)
                 merged["lodging_cost_targets"] = budget.derive_lodging_targets(intent)
                 merged["transport_one_way_target"] = budget.derive_transport_target(intent)
-                return {"tool_context": merged, "timeline": local_tl}
-            return {"timeline": local_tl}
+            if not merged.get("trip_windows"):
+                tw = derive_trip_windows(
+                    merged.get("flights_outbound") or [],
+                    merged.get("flights_return") or [],
+                )
+                if any(v is not None for v in tw.values()):
+                    merged["trip_windows"] = tw
+            return {"tool_context": merged, "timeline": local_tl}
 
         if on_progress:
             on_progress(f"Research: fetching live data for {intent.dest}...")
@@ -522,6 +651,8 @@ def _build_graph(
         flight_warnings: list[str] = []
         serpapi_key = _os.environ.get("SERPAPI_API_KEY", "").strip()
         drive_dist_mi = _parse_drive_distance(ctx.get("route_drive"))
+        dest_lat: float | None = None
+        dest_lon: float | None = None
 
         if drive_dist_mi is not None and drive_dist_mi <= 100:
             # Short trip — drive only; skip flight search entirely.
@@ -541,14 +672,19 @@ def _build_graph(
         else:
             # Resolve airport codes with ≤200 mi nearest-airport fallback.
             try:
-                org_iata, _org_fc, org_drive_leg = live._resolve_with_fallback(intent.org)
-                dest_iata, dest_fc, dest_drive_leg = live._resolve_with_fallback(intent.dest)
+                org_iata, _org_fc, org_drive_leg, _org_lat, _org_lon = live._resolve_with_fallback(
+                    intent.org, on_progress=on_progress
+                )
+                _dest_res = live._resolve_with_fallback(
+                    intent.dest, on_progress=on_progress
+                )
+                dest_iata, dest_fc, dest_drive_leg, dest_lat, dest_lon = _dest_res
 
-                if dest_fc and on_progress:
-                    on_progress(
-                        f"No airport in {intent.dest}; nearest is {dest_iata} "
-                        "— flights include drive transfer."
-                    )
+                # Drive-from-airport segments (after the flight) so both Day 1
+                # and last-day transportation strings show the full chain when
+                # the user's city has no direct airport.
+                out_arrival_drive = _reverse_drive_leg(dest_drive_leg, intent.dest)
+                ret_arrival_drive = _reverse_drive_leg(org_drive_leg, intent.org)
 
                 # Try round-trip search first (9.4); fall back to two one-ways on error.
                 rt_ok = False
@@ -557,42 +693,46 @@ def _build_graph(
                         out_strs, ret_strs = live.flight_search_round_trip(
                             org_iata, dest_iata, depart, ret,
                             dep_id=org_iata, arr_id=dest_iata,
+                            on_progress=on_progress,
                         )
                         ctx["flights_outbound"] = [
-                            f"{org_drive_leg}; {f}" for f in out_strs
-                        ] if org_drive_leg else out_strs
+                            _compose_flight_segments(org_drive_leg, f, out_arrival_drive)
+                            for f in out_strs
+                        ]
                         ctx["flights_return"] = [
-                            f"{dest_drive_leg}; {f}" for f in ret_strs
-                        ] if dest_drive_leg else ret_strs
+                            _compose_flight_segments(dest_drive_leg, f, ret_arrival_drive)
+                            for f in ret_strs
+                        ]
                         ctx["flights_round_trip"] = True
                         rt_ok = True
-                        if on_progress:
-                            on_progress("Round-trip flight search succeeded.")
                     except RuntimeError as e:
                         flight_warnings.append(f"round-trip search failed, using one-ways: {e}")
 
                 if not rt_ok:
                     try:
-                        ctx["flights_outbound"] = live.flight_search(
+                        out_strs = live.flight_search(
                             org_iata, dest_iata, depart,
+                            prefer_early_departure=True,
+                            on_progress=on_progress,
                         )
-                        if org_drive_leg:
-                            ctx["flights_outbound"] = [
-                                f"{org_drive_leg}; {f}" for f in ctx["flights_outbound"]
-                            ]
+                        ctx["flights_outbound"] = [
+                            _compose_flight_segments(org_drive_leg, f, out_arrival_drive)
+                            for f in out_strs
+                        ]
                     except RuntimeError as e:
                         ctx["flights_outbound"] = []
                         flight_warnings.append(f"outbound flight search failed: {e}")
 
                     try:
-                        ctx["flights_return"] = live.flight_search(
+                        ret_strs = live.flight_search(
                             dest_iata, org_iata, ret,
                             prefer_late_departure=True,
+                            on_progress=on_progress,
                         )
-                        if dest_drive_leg:
-                            ctx["flights_return"] = [
-                                f"{dest_drive_leg}; {f}" for f in ctx["flights_return"]
-                            ]
+                        ctx["flights_return"] = [
+                            _compose_flight_segments(dest_drive_leg, f, ret_arrival_drive)
+                            for f in ret_strs
+                        ]
                     except RuntimeError as e:
                         ctx["flights_return"] = []
                         flight_warnings.append(f"return flight search failed: {e}")
@@ -616,9 +756,28 @@ def _build_graph(
         n_restaurants = min(40, max(12, intent.days * 4))
         n_attractions = min(30, max(12, intent.days * 3))
 
-        # Destination data — live first, sandbox fallback if empty so delivery_rate
-        # does not collapse when Google Maps returns nothing for a valid city.
-        ctx["hotels"] = live.search_places(intent.dest, "hotels", max_results=n_hotels)
+        # Destination data — live only. The live planner never falls back to
+        # sandbox: a missing live result must surface as an error so the user
+        # knows live data is unavailable, instead of silently sourcing from
+        # the historical TravelPlanner sandbox.
+        # Hotels: prefer geo-radius search near destination coordinates when
+        # available from airport resolution; fall back to text search otherwise.
+        if dest_lat is not None and dest_lon is not None:
+            try:
+                budget_lvls = budget.price_levels_for_nightly_target(intent)
+                hotels_geo = live.search_lodging_near(
+                    (dest_lat, dest_lon),
+                    budget_levels=budget_lvls,
+                    max_results=n_hotels,
+                )
+            except Exception:
+                hotels_geo = []
+            ctx["hotels"] = hotels_geo or live.search_places(
+                intent.dest, "hotels", max_results=n_hotels
+            )
+        else:
+            ctx["hotels"] = live.search_places(intent.dest, "hotels", max_results=n_hotels)
+
         ctx["restaurants"] = live.search_places(
             intent.dest, "restaurants", max_results=n_restaurants
         )
@@ -626,26 +785,9 @@ def _build_graph(
             intent.dest, "top tourist attractions", max_results=n_attractions
         )
 
-        degraded: list[str] = []
-        if not ctx.get("hotels"):
-            fb = _sandbox_fallback(intent.dest, "hotels", limit=n_hotels)
-            if fb:
-                ctx["hotels"] = fb
-                degraded.append("hotels")
-        if not ctx.get("restaurants"):
-            fb = _sandbox_fallback(intent.dest, "restaurants", limit=n_restaurants)
-            if fb:
-                ctx["restaurants"] = fb
-                degraded.append("restaurants")
-        if not ctx.get("attractions"):
-            fb = _sandbox_fallback(intent.dest, "attractions", limit=n_attractions)
-            if fb:
-                ctx["attractions"] = fb
-                degraded.append("attractions")
-
         if not ctx.get("hotels"):
             raise RuntimeError(
-                f"No hotel results returned for '{intent.dest}' (live + sandbox both empty). "
+                f"No hotel results returned for '{intent.dest}'. "
                 "Check GOOGLE_MAPS_API_KEY and destination spelling."
             )
         if not ctx.get("restaurants"):
@@ -660,12 +802,20 @@ def _build_graph(
             ctx["lodging_cost_targets"] = budget.derive_lodging_targets(intent)
             ctx["transport_one_way_target"] = budget.derive_transport_target(intent)
 
+        # Derive trip_windows from ranked flight lists so all specialists
+        # receive timing context even when running in parallel with transport.
+        tw = derive_trip_windows(
+            ctx.get("flights_outbound") or [],
+            ctx.get("flights_return") or [],
+        )
+        if any(v is not None for v in tw.values()):
+            ctx["trip_windows"] = tw
+
         if on_progress:
-            note = f" (sandbox fallback for: {', '.join(degraded)})" if degraded else ""
             on_progress(
                 f"Research complete: {len(ctx['hotels'])} hotels, "
                 f"{len(ctx['restaurants'])} restaurants, "
-                f"{len(ctx['attractions'])} attractions fetched{note}."
+                f"{len(ctx['attractions'])} attractions fetched."
             )
         return {"tool_context": ctx, "timeline": local_tl}
 
@@ -820,12 +970,60 @@ def _build_graph(
         repair_notes: dict[str, str] = {}
         rerun: set[str] = set()
         budget_report: BudgetReport | None = state.get("budget_plan")
+        tool_context: ToolContext = state.get("tool_context") or {}  # type: ignore[assignment]
         prev_keys = set(state.get("prev_violation_keys") or [])
         cur_keys: list[str] = []
+
+        # ── Deterministic pre-repair: fix mechanical violations without LLM ────
+        # Diversity rules (duplicate venues) are fixed by substituting unused
+        # venues from ToolContext. Only skip LLM re-run when ALL violations for
+        # that specialist are mechanical — if there's also a budget or cuisine
+        # violation, the specialist must still re-run to address it.
+        _MECH_RULES = {"diverse_restaurants", "diverse_attractions"}
+        specialist_rules: dict[str, set[str]] = {
+            "dining": set(), "sightseeing": set(),
+        }
+        for v in report.violations:
+            if v.responsible in specialist_rules:
+                specialist_rules[v.responsible].add(v.rule)
+
+        mech_updates: dict = {}
+        mech_fixed: set[str] = set()
+
+        dp = state.get("dining_plan")
+        if (
+            dp is not None
+            and specialist_rules["dining"]
+            and specialist_rules["dining"].issubset(_MECH_RULES)
+        ):
+            new_dp, fixed = _mech_repair_dining(dp, tool_context)
+            if fixed:
+                mech_updates["dining_plan"] = new_dp
+                mech_fixed.add("dining")
+                if on_progress:
+                    on_progress("Pre-repair: fixed duplicate restaurants deterministically.")
+
+        sp = state.get("sightseeing_plan")
+        if (
+            sp is not None
+            and specialist_rules["sightseeing"]
+            and specialist_rules["sightseeing"].issubset(_MECH_RULES)
+        ):
+            new_sp, fixed = _mech_repair_sightseeing(sp, tool_context)
+            if fixed:
+                mech_updates["sightseeing_plan"] = new_sp
+                mech_fixed.add("sightseeing")
+                if on_progress:
+                    on_progress("Pre-repair: fixed duplicate attractions deterministically.")
 
         for v in report.violations:
             key = f"{v.rule}|{v.responsible}"
             cur_keys.append(key)
+
+            # Skip LLM routing for mechanically-fixed violations.
+            if v.responsible in mech_fixed and v.rule in _MECH_RULES:
+                continue
+
             is_repeat = key in prev_keys
             escalate_prefix = "[URGENT — prior repair did NOT resolve this] " if is_repeat else ""
 
@@ -864,21 +1062,28 @@ def _build_graph(
             elif v.responsible in {"transport", "lodging", "dining", "sightseeing"}:
                 rerun.add(v.responsible)
 
-        # `rerun` is guaranteed non-empty here: verify only routes here when
-        # violations exist, and every Violation.responsible maps to at least
-        # one specialist (budget → worst category, coordinator → all four).
-        rerun_list = sorted(rerun)
+        # Remove mechanically-fixed specialists from the LLM rerun list so they
+        # preserve their patched plans through the next assemble pass.
+        rerun -= mech_fixed
+
+        rerun_list = sorted(rerun)  # may be [] if all violations were mechanical
         cur_round = state.get("repair_round", 0) + 1
         if on_progress:
+            mech_note = (
+                f"; {len(mech_fixed)} fixed deterministically"
+                if mech_fixed else ""
+            )
             on_progress(
                 f"Repair pass {cur_round}/{REPAIR_MAX_ROUNDS} "
-                f"({len(report.violations)} violations; rerun: {', '.join(rerun_list)})..."
+                f"({len(report.violations)} violations; rerun: "
+                f"{', '.join(rerun_list) or 'none (all mechanical)'}{mech_note})..."
             )
         return {
             "repair_notes": repair_notes,
             "rerun_specialists": rerun_list,
             "repair_round": cur_round,
             "prev_violation_keys": cur_keys,
+            **mech_updates,
         }
 
     def finalize_node(state: CoordinatorState) -> CoordinatorState:
@@ -912,13 +1117,15 @@ def _build_graph(
 
         graph.add_edge("repair_prepare", "transport")
     else:
-        # Transport-first fan-out: downstream specialists see arrival/departure
-        # windows in tool_context before they plan meals/attractions/lodging.
-        graph.add_edge("research", "transport")
-        graph.add_edge("repair_prepare", "transport")  # repair also starts with transport
-        for node in ("lodging", "dining", "sightseeing"):
-            graph.add_edge("transport", node)
+        # Full parallel fan-out: research_node pre-populates trip_windows from
+        # flights_outbound[0]/flights_return[0] so all four specialists receive
+        # timing context (arrival/departure grid) without waiting for transport.
+        # transport_node still calls _merge_trip_windows to update the context
+        # with the specialist's actual flight pick (used by the verifier).
+        for node in ("transport", "lodging", "dining", "sightseeing"):
+            graph.add_edge("research", node)
             graph.add_edge(node, "assemble")
+            graph.add_edge("repair_prepare", node)
 
     # Budget Agent always runs after assembly (paper §4.3).
     graph.add_edge("assemble", "budget")

@@ -33,9 +33,10 @@ SYSTEM = (
     "Preserve the EXACT departure and arrival times from the listed option "
     "(e.g., 'Airline HH:MM->HH:MM Duration: Xh Ym Cost: $N').\n"
     "- For self-driving or taxi use 'Self-driving; Cost: $N' or 'Taxi; Cost: $N'.\n"
-    "- When a flight option begins with 'Drive {N} mi to {IATA};', that drive leg "
-    "is part of the day's transportation — include it verbatim. The drive cost is "
-    "bundled into the flight cost shown.\n"
+    "- **DRIVE LEGS — VERBATIM**: A flight option may include drive segments before "
+    "and/or after the flight: 'Drive {N} mi to {IATA}; {flight}; Drive {M} mi from "
+    "{IATA} to {city}'. ALL drive segments are part of the day's transportation — "
+    "include every segment verbatim. Drive costs are bundled into the flight cost.\n"
     "- **ROUND-TRIP COST RULE**: When the tool context notes 'ROUND-TRIP FARES', "
     "the Cost: $N shown on outbound options is the TOTAL round-trip price. "
     "Use it on Day 1 only. The last-day return description must NOT include any "
@@ -47,10 +48,11 @@ SYSTEM = (
     '{"day": 1, "description": "Southwest 1234 10:00->11:10 Duration: 1h 10m Cost: $89"}, '
     '{"day": 2, "description": "Southwest 5678 17:00->18:10 Duration: 1h 10m Cost: $89"}'
     "]}\n\n"
-    "Few-shot example (2-day trip, round-trip fare — cost on Day 1 only):\n"
+    "Few-shot example (2-day trip into a city without a direct airport — drive "
+    "legs on BOTH ends of each flight, round-trip fare):\n"
     '{"days": ['
-    '{"day": 1, "description": "Delta 1234 08:00->09:15 Duration: 1h 15m Cost: $220"}, '
-    '{"day": 2, "description": "Delta 5678 17:00->18:15 Duration: 1h 15m"}'
+    '{"day": 1, "description": "Drive 50 mi to JFK; Delta 1234 09:00->11:30 Duration: 2h 30m Cost: $310; Drive 87 mi from PNS to Pensacola"}, '
+    '{"day": 2, "description": "Drive 87 mi from Pensacola to PNS; Delta 5678 17:00->20:00 Duration: 3h; Drive 50 mi from JFK to New York"}'
     "]}"
 )
 
@@ -82,13 +84,14 @@ def run(intent: Intent, tool_context: ToolContext, repair_note: str = "") -> Tra
 def _call(intent: Intent, ctx: ToolContext, tool_results: str, repair_note: str) -> TransportPlan:
     cap = _format_transport_cap(ctx)
     user = (
-        f"Intent: {intent.model_dump_json()}\n\n"
+        f"Intent: {intent.for_specialist('transport')}\n\n"
         f"Tool results:\n{tool_results}\n\n"
         + (cap + "\n\n" if cap else "")
         + (f"Repair note from verifier: {repair_note}\n\n" if repair_note else "")
         + f"Produce a TransportPlan covering days 1..{intent.days}."
     )
-    return call_json(SYSTEM, user, TransportPlan, think_first=True)
+    think = bool(repair_note)
+    return call_json(SYSTEM, user, TransportPlan, max_tokens=800, think_first=think)
 
 
 def _allowed_flight_ids(ctx: ToolContext) -> set[str]:

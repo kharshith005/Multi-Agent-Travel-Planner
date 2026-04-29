@@ -9,17 +9,18 @@ RuntimeError immediately (caller should check available_models() first).
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
-import threading
+import sys
 
 try:
     from anthropic import AnthropicVertex
 except ImportError:
     AnthropicVertex = None  # type: ignore[assignment,misc]
 
-_client_lock = threading.Lock()
-_claude_client = None
+# Fixed 2-minute timeout for any single API call.
+API_TIMEOUT_SECONDS = 120.0
 
 
 def _project() -> str:
@@ -36,27 +37,41 @@ def _region() -> str:
     r = os.environ.get("CLAUDE_VERTEX_REGION", "").strip()
     if not r:
         raise RuntimeError(
-            "Set CLAUDE_VERTEX_REGION (e.g. us-east5) for Claude on Vertex AI."
+            "Set CLAUDE_VERTEX_REGION (e.g. global) for Claude on Vertex AI."
         )
     return r
 
 
-def _client():
-    global _claude_client
+@functools.lru_cache(maxsize=1)
+def _build_client():
     if AnthropicVertex is None:
         raise RuntimeError(
             "anthropic[vertex] package not installed. "
             "Run: pip install 'anthropic[vertex]'"
         )
-    with _client_lock:
-        if _claude_client is None:
-            _claude_client = AnthropicVertex(region=_region(), project_id=_project())
-        return _claude_client
+    # max_retries=0: agents/llm.py owns the retry loop. Without this,
+    # every 429 burns N×2 quota slots (SDK default max_retries=2),
+    # which on a tight Vertex quota rapidly self-perpetuates the 429.
+    return AnthropicVertex(
+        region=_region(),
+        project_id=_project(),
+        timeout=API_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
+
+
+def _client():
+    return _build_client()
+
+
+def clear_client_cache() -> None:
+    """Clear the cached AnthropicVertex client (for tests or auth rotation)."""
+    _build_client.cache_clear()
 
 
 def _vertex_model_id(model_id: str) -> str:
-    """Strip registry @revision suffix if the SDK expects bare model names."""
-    return model_id
+    """Strip @revision suffix — Vertex SDK expects bare model names (e.g. claude-sonnet-4-6)."""
+    return model_id.split("@", 1)[0]
 
 
 def generate(
@@ -76,6 +91,12 @@ def generate(
     client = _client()
     vertex_id = _vertex_model_id(model_id)
 
+    if os.environ.get("CLAUDE_DEBUG") == "1":
+        print(
+            f"[claude] model={vertex_id} region={_region()} project={_project()[:8]}…",
+            file=sys.stderr,
+        )
+
     messages = [{"role": "user", "content": user}]
 
     try:
@@ -93,6 +114,7 @@ def generate(
                 messages=messages,
                 tools=[tool],
                 tool_choice={"type": "tool", "name": "structured_output"},
+                timeout=API_TIMEOUT_SECONDS,
             )
             for block in resp.content:
                 if getattr(block, "type", None) == "tool_use" and block.name == "structured_output":
@@ -125,7 +147,7 @@ def generate(
         status = getattr(e, "status_code", None)
         err = RuntimeError(
             f"Claude request failed ({status or 'error'}): {e}. "
-            "Check GOOGLE_CLOUD_PROJECT, CLAUDE_VERTEX_REGION, and ADC configuration."
+            "Check GOOGLE_CLOUD_PROJECT, CLAUDE_VERTEX_REGION (e.g. global), and ADC configuration."
         )
         setattr(err, "status_code", status)
         raise err from e

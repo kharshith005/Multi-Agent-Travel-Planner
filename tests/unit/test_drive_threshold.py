@@ -86,11 +86,10 @@ def test_research_node_sets_empty_flights_when_drive_only(monkeypatch):
             return [{"name": f"P{i}", "rating": 4.0, "address": city, "price_level": 2}
                     for i in range(max_results)]
 
-        def _resolve_with_fallback(self, loc):
-            return ("JFK", None, None)
+        def _resolve_with_fallback(self, loc, on_progress=None):
+            return ("JFK", None, None, None, None)
 
     monkeypatch.setattr(coord, "default_live_apis", lambda: FakeLive())
-    monkeypatch.setattr(coord, "default_sandbox", lambda mode: None)
     monkeypatch.delenv("SERPAPI_API_KEY", raising=False)
 
     intent = Intent(

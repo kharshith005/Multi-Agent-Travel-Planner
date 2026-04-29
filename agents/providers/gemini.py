@@ -5,9 +5,9 @@ Auth: VERTEX_AI_API_KEY environment variable.
 """
 from __future__ import annotations
 
+import functools
 import os
 import re
-import threading
 
 try:
     from google import genai
@@ -22,8 +22,8 @@ except ImportError:
     pass
 
 
-_client_lock = threading.Lock()
-_genai_client = None
+# Fixed 2-minute timeout, matching claude.py.
+API_TIMEOUT_SECONDS = 120.0
 
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 _RETRY_HINTS = (
@@ -43,14 +43,25 @@ def _vertex_api_key() -> str:
     return key
 
 
-def _client():
-    global _genai_client
+@functools.lru_cache(maxsize=1)
+def _build_client():
     if genai is None:
         raise RuntimeError("google-genai package not installed. Run: pip install google-genai")
-    with _client_lock:
-        if _genai_client is None:
-            _genai_client = genai.Client(vertexai=True, api_key=_vertex_api_key())
-        return _genai_client
+    # http_options.timeout is in milliseconds per the google-genai SDK schema.
+    return genai.Client(
+        vertexai=True,
+        api_key=_vertex_api_key(),
+        http_options={"timeout": int(API_TIMEOUT_SECONDS * 1000)},
+    )
+
+
+def _client():
+    return _build_client()
+
+
+def clear_client_cache() -> None:
+    """Clear the cached Gemini client (for tests or auth rotation)."""
+    _build_client.cache_clear()
 
 
 def _status_code(exc: Exception) -> int | None:

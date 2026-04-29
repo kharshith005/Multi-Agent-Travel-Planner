@@ -14,7 +14,6 @@ from dotenv import load_dotenv
 from agents import budget as _budget_agent
 from agents.coordinator import intent_constraint_violations, parse_intent, plan_trip
 from agents.models import available_models, default_model_id
-from agents.runtime_status import flights_available, llm_available, places_available
 from agents.schemas import BudgetReport, FullPlan, Intent, VerifierReport
 from baseline.single_agent import plan_trip_single
 
@@ -53,35 +52,39 @@ with st.sidebar:
     _avail_models = available_models()
     _default_id = default_model_id()
     if _avail_models:
-        _model_options = {m.display_name: m.id for m in _avail_models}
-        _default_name = next(
-            (m.display_name for m in _avail_models if m.id == _default_id),
-            list(_model_options)[0],
+        # Grouped picker: ⚡ Fast & low-cost (lite) | 🧠 Premium reasoning (standard)
+        _fast = [m for m in _avail_models if m.tier == "lite"]
+        _premium = [m for m in _avail_models if m.tier != "lite"]
+        _group_options: list[str] = []
+        _model_id_map: dict[str, str] = {}
+        for m in _fast:
+            label = f"⚡ {m.display_name}"
+            _group_options.append(label)
+            _model_id_map[label] = m.id
+        for m in _premium:
+            label = f"🧠 {m.display_name}"
+            _group_options.append(label)
+            _model_id_map[label] = m.id
+        _default_label = next(
+            (
+                (f"⚡ {m.display_name}" if m.tier == "lite" else f"🧠 {m.display_name}")
+                for m in _avail_models if m.id == _default_id
+            ),
+            _group_options[0] if _group_options else "",
         )
         _selected_name = st.selectbox(
             "LLM model",
-            options=list(_model_options),
-            index=list(_model_options).index(_default_name),
-            help="Only models whose auth is configured are shown. "
-                 "Claude entries require GOOGLE_CLOUD_PROJECT + CLAUDE_VERTEX_REGION. "
-                 "GPT/OpenAI is excluded: Vertex AI does not host OpenAI models.",
+            options=_group_options,
+            index=_group_options.index(_default_label) if _default_label in _group_options else 0,
+            help="⚡ Fast & low-cost  |  🧠 Premium reasoning.",
         )
-        selected_model_id = _model_options[_selected_name]
-        # Reset cached plan state when model changes to avoid cross-model contamination.
+        selected_model_id = _model_id_map[_selected_name]
         if st.session_state.get("_last_model_id") != selected_model_id:
             st.session_state["_last_model_id"] = selected_model_id
     else:
-        st.warning("No models available. Check VERTEX_AI_API_KEY in .env.")
+        st.warning("No models available. Run scripts/validate_env.py to check configuration.")
         selected_model_id = _default_id
 
-    st.divider()
-    st.subheader("Live data sources")
-    _ok = ":green[✓ active]"
-    _missing = ":orange[✗ not configured]"
-    st.markdown(f"- **LLM planning:** {_ok if llm_available() else _missing}")
-    st.markdown(f"- **Flight search:** {_ok if flights_available() else _missing}")
-    st.markdown(f"- **Places & maps:** {_ok if places_available() else _missing}")
-    st.caption("Run `scripts/validate_env.py` to check configuration.")
 
 
 # --------- chat state ---------
@@ -195,10 +198,10 @@ def render_plan(
 
     # ── (A) Trip Summary card ─────────────────────────────────────────────────
     with st.container(border=True):
-        r1c1, r1c2, r1c3 = st.columns(3)
-        r1c1.metric("Trip", f"{org} → {dest}")
-        r1c2.metric("Days", total_days)
-        r1c3.metric("People", intent.people if intent else 1)
+        st.markdown(f"### {org} → {dest}")
+        c1, c2 = st.columns(2)
+        c1.metric("Days", total_days)
+        c2.metric("People", intent.people if intent else 1)
 
         if budget_report:
             total = budget_report.total_cost
@@ -245,13 +248,9 @@ def render_plan(
 
     # ── (D) Per-day timeline ──────────────────────────────────────────────────
     for day in plan.plan:
-        is_travel_day = day.days in {1, total_days}
         header = f"**Day {day.days}** — {day.current_city}"
         with st.container(border=True):
             st.markdown(header)
-            if is_travel_day and not _is_missing_text(day.transportation):
-                st.caption(f"🚀 {_val(day.transportation)}")
-
             col_t, col_s, col_stay = st.columns([1, 2, 1])
 
             with col_t:
@@ -448,22 +447,12 @@ if user_query:
                 st.divider()
                 fc1, fc2, fc3 = st.columns(3)
                 fc1.metric("LLM calls", llm_stats.get("llm_calls", 0))
-                fc2.metric(
-                    "Tokens",
-                    f"{llm_stats.get('input_tokens', 0)}↑ {llm_stats.get('output_tokens', 0)}↓",
-                )
-                fc3.metric(
-                    "Cache",
-                    f"{llm_stats.get('cache_hits', 0)} hits / "
-                    f"{llm_stats.get('cache_misses', 0)} misses",
-                )
-                ok = ":green[active]"
-                na = ":orange[not configured]"
+                fc2.metric("Input tokens", f"{llm_stats.get('input_tokens', 0):,}")
+                fc3.metric("Output tokens", f"{llm_stats.get('output_tokens', 0):,}")
                 st.caption(
-                    f"Model: `{selected_model_id}` · "
-                    f"LLM {ok if llm_available() else na} · "
-                    f"Flights {ok if flights_available() else na} · "
-                    f"Places {ok if places_available() else na}"
+                    "Input = prompt tokens sent. Output = tokens the model generated. "
+                    "Lower = faster + cheaper. Repair rounds increase both."
                 )
+                st.caption(f"Model: `{selected_model_id}`")
                 progress_box.empty()
                 st.session_state["messages"].append({"role": "assistant", "content": "Plan rendered above."})

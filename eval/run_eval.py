@@ -34,9 +34,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from agents.coordinator import plan_trip
-from agents.llm import get_call_stats, reset_call_stats
-from agents.models import REGISTRY, available_models, default_model_id
+from agents.coordinator import derive_trip_windows, plan_trip
+from agents.llm import call_text, get_call_stats, reset_call_stats
+from agents.models import REGISTRY, available_models, default_model_id, get_model
+from agents.runtime import use_model
 from agents.schemas import FullPlan, Intent, PlanDay, ToolContext
 from baseline.no_specialization import plan_trip_no_specialization
 from baseline.no_verify import plan_trip_no_verify
@@ -129,6 +130,12 @@ def _sandbox_tool_context(intent: Intent, sandbox: Sandbox) -> ToolContext:
         }
         for r in sandbox.attraction_search(intent.dest)
     ]
+
+    # Pre-populate trip_windows so all specialists fan out in parallel with
+    # timing context (arrival/departure grid) already set (Phase 5).
+    tw = derive_trip_windows(ctx.get("flights_outbound") or [], ctx.get("flights_return") or [])
+    if any(v is not None for v in tw.values()):
+        ctx["trip_windows"] = tw
 
     return ctx
 
@@ -274,6 +281,12 @@ def main():
         default=0.0,
         help="Seconds to sleep between model sweeps (helps with rate limits).",
     )
+    ap.add_argument(
+        "--probe-models",
+        action="store_true",
+        default=False,
+        help="Before the sweep, send a minimal test call to each model and skip any that fail.",
+    )
     args = ap.parse_args()
 
     if args.llm_cache_dir:
@@ -291,6 +304,37 @@ def main():
     if not model_ids:
         print("No models available. Check auth configuration.", file=sys.stderr)
         sys.exit(1)
+
+    # Hard-fail on unknown model IDs before launching the sweep — silent
+    # fallback to a default would attribute 180 rows to the wrong model.
+    for mid in model_ids:
+        get_model(mid)
+
+    if args.probe_models:
+        print("\n=== Model probe ===", file=sys.stderr)
+        print(f"{'model':<40} {'provider':<10} {'status':<8} {'ms':>6}", file=sys.stderr)
+        print("-" * 68, file=sys.stderr)
+        live_model_ids: list[str] = []
+        for mid in model_ids:
+            provider = get_model(mid).provider
+            t0 = time.time()
+            try:
+                with use_model(mid):
+                    call_text(system="ping", user="ping", max_tokens=4)
+                ms = int((time.time() - t0) * 1000)
+                print(f"{mid:<40} {provider:<10} {'OK':<8} {ms:>6}", file=sys.stderr)
+                live_model_ids.append(mid)
+            except Exception as e:
+                ms = int((time.time() - t0) * 1000)
+                print(f"{mid:<40} {provider:<10} {'FAIL':<8} {ms:>6}  ({e})", file=sys.stderr)
+        print("-" * 68, file=sys.stderr)
+        if not live_model_ids:
+            print("All models failed probe. Aborting.", file=sys.stderr)
+            sys.exit(1)
+        skipped = set(model_ids) - set(live_model_ids)
+        if skipped:
+            print(f"Skipping {len(skipped)} failed model(s): {', '.join(sorted(skipped))}", file=sys.stderr)
+        model_ids = live_model_ids
 
     df = _load_split(args.split)
     if args.split == "train" and args.system == "annotated":
@@ -311,12 +355,8 @@ def main():
     reports_by_key: dict[str, list[ConstraintReport]] = {}
 
     for model_idx, model_id in enumerate(model_ids):
-        # Look up provider for CSV column
-        try:
-            from agents.models import get_model
-            provider = get_model(model_id).provider
-        except KeyError:
-            provider = "gemini"
+        # Look up provider for CSV column. Validated above; KeyError here is a bug.
+        provider = get_model(model_id).provider
 
         if model_idx > 0 and args.cooldown_seconds > 0:
             print(f"Cooling down {args.cooldown_seconds}s before next model...", file=sys.stderr)

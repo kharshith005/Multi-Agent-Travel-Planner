@@ -3,10 +3,28 @@
 Usage (via agents/llm.py facade only):
     from agents.providers import call_provider
     text, in_tok, out_tok = call_provider(model_entry, system, user, ...)
+
+To invalidate cached singleton clients (e.g., after auth rotation or in tests):
+    from agents.providers import clear_caches
+    clear_caches()
 """
 from __future__ import annotations
 
 from agents.models import ModelEntry
+
+
+def clear_caches() -> None:
+    """Clear all cached LLM client singletons so the next call re-initializes them."""
+    try:
+        from .gemini import clear_client_cache as _g
+        _g()
+    except Exception:
+        pass
+    try:
+        from .claude import clear_client_cache as _c
+        _c()
+    except Exception:
+        pass
 
 
 def call_provider(

@@ -78,7 +78,7 @@ def _call(intent: Intent, ctx: ToolContext, tool_results: str, repair_note: str)
     windows = format_trip_windows(ctx)
     cap = _format_lodging_cap(ctx, intent)
     user = (
-        f"Intent: {intent.model_dump_json()}\n\n"
+        f"Intent: {intent.for_specialist('lodging')}\n\n"
         f"Accommodations in {intent.dest}:\n{tool_results}\n\n"
         + (windows + "\n\n" if windows else "")
         + (cap + "\n\n" if cap else "")
@@ -86,7 +86,8 @@ def _call(intent: Intent, ctx: ToolContext, tool_results: str, repair_note: str)
         + f"Produce a LodgingPlan covering days 1..{intent.days} "
           f"(last day description must be '-')."
     )
-    return call_json(SYSTEM, user, LodgingPlan, think_first=True)
+    think = bool(repair_note)
+    return call_json(SYSTEM, user, LodgingPlan, max_tokens=600, think_first=think)
 
 
 def _format_tool_context(ctx: ToolContext) -> str:
@@ -102,8 +103,7 @@ def _format_tool_context(ctx: ToolContext) -> str:
             level = 2
         est_price = cost_map.get(level, cost_map.get(2, 130))
         lines.append(
-            f"  [{i}] {r.get('name')} | rating:{r.get('rating')} | "
-            f"address:{r.get('address')} | est_nightly:${est_price}"
+            f"  [{i}] {r.get('name')} | rating:{r.get('rating')} | est_nightly:${est_price}"
         )
     return "\n".join(lines)
 

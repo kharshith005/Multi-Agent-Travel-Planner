@@ -104,13 +104,14 @@ def _substitute_attractions(plan: SightseeingPlan, allowed: set[str], city: str)
 def _call(intent: Intent, ctx: ToolContext, tool_results: str, repair_note: str) -> SightseeingPlan:
     windows = format_trip_windows(ctx)
     user = (
-        f"Intent: {intent.model_dump_json()}\n\n"
+        f"Intent: {intent.for_specialist('sightseeing')}\n\n"
         f"Attractions in {intent.dest}:\n{tool_results}\n\n"
         + (windows + "\n\n" if windows else "")
         + (f"Repair note: {repair_note}\n\n" if repair_note else "")
         + f"Produce a SightseeingPlan covering days 1..{intent.days}."
     )
-    return call_json(SYSTEM, user, SightseeingPlan, think_first=True)
+    think = bool(repair_note)
+    return call_json(SYSTEM, user, SightseeingPlan, max_tokens=800, think_first=think)
 
 
 def _format_tool_context(intent: Intent, ctx: ToolContext) -> str:
@@ -120,7 +121,7 @@ def _format_tool_context(intent: Intent, ctx: ToolContext) -> str:
     lines = [f"Live API attractions in {intent.dest}:"]
     for i, r in enumerate(rows, start=1):
         lines.append(
-            f"  [{i}] {r.get('name')} | rating:{r.get('rating')} | address:{r.get('address')}"
+            f"  [{i}] {r.get('name')} | rating:{r.get('rating')}"
         )
     return "\n".join(lines)
 

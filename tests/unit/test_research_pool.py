@@ -97,12 +97,11 @@ def test_research_node_uses_pool_formula(monkeypatch):
         def route_summary(self, *a, **k): return "Distance: 200 mi, Duration: 3h"
         def search_places(self, city, query, *, max_results=8):
             return fake_search_places(city, query, max_results=max_results)
-        def _resolve_with_fallback(self, loc):
-            return ("JFK", None, None)
+        def _resolve_with_fallback(self, loc, on_progress=None):
+            return ("JFK", None, None, None, None)
         def flight_search(self, *a, **k): return []
 
     monkeypatch.setattr(coord, "default_live_apis", lambda: FakeLive())
-    monkeypatch.setattr(coord, "default_sandbox", lambda mode: None)
 
     # 7-day trip → n_hotels=14, n_restaurants=28, n_attractions=21
     intent = Intent(org="NYC", dest="Austin", days=7,

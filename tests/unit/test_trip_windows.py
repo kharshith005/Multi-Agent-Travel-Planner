@@ -164,7 +164,8 @@ def test_safety_clamp_fixes_lunch_when_arrival_after_14():
         lunch_d1="La Paloma, Austin; Cost: $22",            # specialist left lunch
     )
     result = _apply_timing_adjustments(plan, None)
-    assert "transit" in result.plan[0].lunch.lower()
+    # Phase 7: clamp to "-" — transportation is the single source of truth for arrival time
+    assert result.plan[0].lunch == "-"
 
 
 def test_safety_clamp_fixes_dinner_when_arrival_after_19():
@@ -173,7 +174,8 @@ def test_safety_clamp_fixes_dinner_when_arrival_after_19():
         dinner_d1="Uchiko, Austin; Cost: $55",
     )
     result = _apply_timing_adjustments(plan, None)
-    assert "late arrival" in result.plan[0].dinner.lower()
+    # Phase 7: clamp to "-" — no echoed arrival time in meal fields
+    assert result.plan[0].dinner == "-"
 
 
 def test_safety_clamp_fixes_attraction_when_arrival_after_16():

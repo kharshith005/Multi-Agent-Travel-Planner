@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -53,13 +53,8 @@ class _FlightOption:
     arr_time: str
     price: int | None
     duration_min: int | None
+    departure_token: str | None = None
 
-
-@dataclass
-class _RoundTripPair:
-    outbound: _FlightOption
-    inbound: _FlightOption
-    total_price: int | None
 
 
 def _dep_time_minutes(dep_time: str) -> int | None:
@@ -137,6 +132,48 @@ class LiveTravelAPIs:
             )
         return out
 
+    # -------------------- Lodging geo search --------------------
+    def search_lodging_near(
+        self,
+        latlng: tuple[float, float],
+        *,
+        radius_m: int = 48000,
+        max_results: int = 20,
+        budget_levels: set[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search for hotels within `radius_m` metres of `latlng` using Places Nearby.
+
+        Over-fetches (2× max_results) then filters by `budget_levels` and sorts
+        by rating descending, price_level ascending. Hotels with no price_level
+        are kept as "tier unknown".
+        """
+        client = self._client()
+        try:
+            payload = client.places_nearby(
+                location=latlng,
+                radius=radius_m,
+                type="lodging",
+            )
+        except Exception as e:
+            raise RuntimeError(f"Google Maps places_nearby (lodging) failed: {e}") from e
+
+        rows = payload.get("results") or []
+        out: list[dict[str, Any]] = []
+        for r in rows[: max_results * 2]:
+            level = r.get("price_level")
+            if budget_levels and level is not None and level not in budget_levels:
+                continue
+            out.append({
+                "name": r.get("name"),
+                "address": r.get("vicinity") or r.get("formatted_address"),
+                "rating": r.get("rating"),
+                "price_level": level,
+            })
+
+        # Highest-rated first; within same rating, cheapest tier first.
+        out.sort(key=lambda h: (-(h.get("rating") or 0), h.get("price_level") or 99))
+        return out[:max_results]
+
     # -------------------- Distance/Routes --------------------
     def route_summary(self, origin: str, destination: str, mode: str = "driving") -> str | None:
         client = self._client()
@@ -169,6 +206,22 @@ class LiveTravelAPIs:
                 return f"Distance: {distance}, Duration: {duration}, Cost: ${est}"
         return f"Distance: {distance}, Duration: {duration}"
 
+    # -------------------- SerpAPI helper --------------------
+    def _serpapi_get(self, params: dict, *, timeout: int = 20) -> dict:
+        """Execute a SerpAPI request with automatic past-date retry.
+
+        Raises RuntimeError on non-200 responses or network errors.
+        """
+        try:
+            resp = requests.get("https://serpapi.com/search.json", params=params, timeout=timeout)
+            if resp.status_code == 400 and "cannot be in the past" in resp.text.lower():
+                params = {**params, "outbound_date": datetime.utcnow().strftime("%Y-%m-%d")}
+                resp = requests.get("https://serpapi.com/search.json", params=params, timeout=timeout)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            raise RuntimeError(f"SerpAPI request failed: {e}") from e
+
     # -------------------- Flight options (SerpAPI Google Flights) --------------------
     def flight_search(
         self,
@@ -176,9 +229,11 @@ class LiveTravelAPIs:
         destination: str,
         date: str,
         *,
-        max_results: int = 5,
+        max_results: int = 10,
         budget: int | None = None,
         prefer_late_departure: bool = False,
+        prefer_early_departure: bool = False,
+        on_progress: Callable[[str], None] | None = None,
     ) -> list[str]:
         if not self.serpapi_api_key:
             raise RuntimeError("Set SERPAPI_API_KEY for flight search")
@@ -198,14 +253,26 @@ class LiveTravelAPIs:
             "adults": 1,
             "api_key": self.serpapi_api_key,
         }
+        # Server-side time-of-day filter: morning outbound (4–13) so Day 1 has
+        # time for activities; afternoon/evening return (12–21) so last day
+        # gets at least breakfast/lunch. SerpAPI accepts "start,end" hours.
+        if prefer_early_departure:
+            params["outbound_times"] = "4,13"
+        elif prefer_late_departure:
+            params["outbound_times"] = "12,21"
 
         try:
-            resp = requests.get("https://serpapi.com/search.json", params=params, timeout=20)
-            if resp.status_code == 400 and "cannot be in the past" in resp.text.lower():
-                params["outbound_date"] = datetime.utcnow().strftime("%Y-%m-%d")
-                resp = requests.get("https://serpapi.com/search.json", params=params, timeout=20)
-            resp.raise_for_status()
-            payload = resp.json()
+            payload = self._serpapi_get(params)
+            # If a tight time filter returns nothing, broaden by dropping it.
+            if params.get("outbound_times") and not (
+                (payload.get("best_flights") or payload.get("other_flights"))
+            ):
+                if on_progress:
+                    on_progress(
+                        f"No flights matched outbound_times={params['outbound_times']} — broadening."
+                    )
+                params.pop("outbound_times", None)
+                payload = self._serpapi_get(params)
         except Exception as e:
             raise RuntimeError(f"SerpAPI flights request failed: {e}") from e
 
@@ -233,11 +300,17 @@ class LiveTravelAPIs:
                 )
 
         options = self._dedupe_flight_options(options)
+        flight_warnings: list[str] = []
         ranked = self._rank_flight_options(
             options, budget=budget,
             dep_id=dep_id, arr_id=arr_id,
             prefer_late_departure=prefer_late_departure,
+            prefer_early_departure=prefer_early_departure,
+            _warnings=flight_warnings,
         )
+        for w in flight_warnings:
+            if on_progress:
+                on_progress(w)
 
         out: list[str] = []
         for o in ranked[:max_results]:
@@ -337,97 +410,73 @@ class LiveTravelAPIs:
         dep_id: str | None = None,
         arr_id: str | None = None,
         prefer_late_departure: bool = False,
+        prefer_early_departure: bool = False,
+        _warnings: list[str] | None = None,
     ) -> list[_FlightOption]:
         if not options:
             return []
 
-        # 9.1 — Distance-aware duration cap (applied before budget filter so a
-        # very cheap but very long option doesn't slip through the budget check).
+        # 10.1 — Duration cap (soft): skip when it would empty the pool; warn when skipped.
         cap_min = _duration_cap_minutes(dep_id, arr_id)
         if cap_min is not None:
             capped = [o for o in options if o.duration_min is None or o.duration_min <= cap_min]
             if capped:
                 options = capped
-            # else: skip cap — better to return something than nothing
+            elif _warnings is not None:
+                longest = max((o.duration_min or 0) for o in options)
+                _warnings.append(
+                    f"⚠️ All flight options exceed the {cap_min}min cap for this route "
+                    f"(longest: {longest}min). Returning best available."
+                )
 
-        # Hard budget filter: a single leg costing more than 50% of the trip
-        # budget leaves nothing for the return leg, let alone lodging and
-        # dining. Drop those options entirely (only when a budget is known and
-        # the filter leaves at least one option standing).
+        # Hard budget filter: drop options costing more than 50% of trip budget.
         if budget and budget > 0:
             hard_cap = int(0.50 * budget)
-            within_cap = [
-                o for o in options
-                if o.price is None or (o.price is not None and o.price <= hard_cap)
-            ]
+            within_cap = [o for o in options if o.price is None or o.price <= hard_cap]
             if within_cap:
                 options = within_cap
 
-        priced = [o for o in options if o.price is not None]
-        if not priced:
-            return sorted(options, key=lambda o: (o.duration_min or 10**9, o.dep_time, o.arr_time))
+        # 10.4 — Duration-first sort: shortest travel time is most valuable.
+        options = sorted(options, key=lambda o: (o.duration_min or 10**9, o.price or 10**9, o.dep_time))
 
-        cheapest = min(o.price for o in priced if o.price is not None)
-        # Prefer shortest-duration flights; a traveler values their time.
-        # Accept up to 40% (min $100) price premium for a significantly shorter flight.
-        tolerance = max(100, int(0.40 * cheapest))
-
-        near_price = [o for o in priced if o.price is not None and o.price <= cheapest + tolerance]
-
-        soft_per_leg = int(budget * 0.25) if budget and budget > 0 else None
-        if soft_per_leg:
-            within_soft = [o for o in near_price if o.price is not None and o.price <= soft_per_leg]
-            candidate_pool = within_soft if within_soft else near_price
-        else:
-            candidate_pool = near_price
-
-        # 9.2 — Late-return preference: bias toward ≥14:00 departures within
-        # a 1.3× price ceiling vs. the cheapest candidate. Falls back to
-        # duration-first when no late option fits the ceiling.
-        if prefer_late_departure:
-            LATE_THRESHOLD = 14 * 60
-            late_pool = [
-                o for o in candidate_pool
-                if (_dep_time_minutes(o.dep_time) or 0) >= LATE_THRESHOLD
-            ]
-            if late_pool:
-                cheapest_pool_price = min(
-                    (o.price for o in candidate_pool if o.price is not None), default=None
-                )
-                best_late = min(late_pool, key=lambda o: (o.price or 10**9, o.dep_time))
-                if (
-                    cheapest_pool_price is None
-                    or best_late.price is None
-                    or best_late.price <= 1.3 * cheapest_pool_price
-                ):
-                    selected = best_late
-                else:
-                    selected = min(
-                        candidate_pool,
-                        key=lambda o: (o.duration_min or 10**9, o.price or 10**9, o.dep_time),
-                    )
-            else:
-                selected = min(
-                    candidate_pool,
-                    key=lambda o: (o.duration_min or 10**9, o.price or 10**9, o.dep_time),
-                )
-        else:
-            selected = min(
-                candidate_pool,
-                key=lambda o: (o.duration_min or 10**9, o.price or 10**9, o.dep_time),
+        # 10.2 + 10.3 — Time-window preference with layered fallback.
+        if prefer_early_departure:
+            # Outbound morning preference: ≤11:00 → ≤14:00 → earliest in pool.
+            EARLY = 11 * 60
+            EARLY_FB = 14 * 60
+            early = [o for o in options if (_dep_time_minutes(o.dep_time) or 10**9) <= EARLY]
+            if not early:
+                early = [o for o in options if (_dep_time_minutes(o.dep_time) or 10**9) <= EARLY_FB]
+            selected = (
+                min(early, key=lambda o: (_dep_time_minutes(o.dep_time) or 10**9, o.duration_min or 10**9))
+                if early else options[0]
             )
+        elif prefer_late_departure:
+            # Return leg: ≥14:00 within 1.3× cheapest → ≥11:00 within ceiling → duration-first.
+            LATE = 14 * 60
+            LATE_FB = 11 * 60
+            cheapest_p = min((o.price for o in options if o.price is not None), default=None)
+            ceiling = cheapest_p * 1.3 if cheapest_p is not None else None
+            late = [
+                o for o in options
+                if (_dep_time_minutes(o.dep_time) or 0) >= LATE
+                and (ceiling is None or o.price is None or o.price <= ceiling)
+            ]
+            if not late:
+                late = [
+                    o for o in options
+                    if (_dep_time_minutes(o.dep_time) or 0) >= LATE_FB
+                    and (ceiling is None or o.price is None or o.price <= ceiling)
+                ]
+            selected = (
+                max(late, key=lambda o: (_dep_time_minutes(o.dep_time) or 0))
+                if late else options[0]
+            )
+        else:
+            selected = options[0]
 
         remainder = [o for o in options if o is not selected]
-        remainder_sorted = sorted(
-            remainder,
-            key=lambda o: (
-                0 if o.price is not None else 1,
-                o.price or 10**9,
-                o.duration_min or 10**9,
-                o.dep_time,
-            ),
-        )
-        return [selected] + remainder_sorted
+        return [selected] + remainder
 
     def flight_search_round_trip(
         self,
@@ -436,17 +485,22 @@ class LiveTravelAPIs:
         depart_date: str,
         return_date: str,
         *,
-        max_results: int = 5,
+        max_results: int = 10,
         budget: int | None = None,
         prefer_late_return: bool = True,
         dep_id: str | None = None,
         arr_id: str | None = None,
+        on_progress: Callable[[str], None] | None = None,
     ) -> tuple[list[str], list[str]]:
-        """Round-trip flight search using SerpAPI type=1.
+        """Round-trip flight search via SerpAPI two-call departure_token protocol.
+
+        Call 1 (type=1): fetch outbound itineraries; each carries a departure_token
+        and the round-trip total price.
+        Call 2: same params + departure_token → fetch matching return options.
 
         Returns (outbound_strings, return_strings). Outbound strings carry
-        'Cost: $N' (the round-trip price). Return strings omit the cost
-        fragment — cost is attributed to Day 1 only.
+        'Cost: $N' (round-trip total). Return strings omit the cost fragment —
+        cost is attributed to Day 1 only.
 
         Raises RuntimeError on SerpAPI failure or empty results; the coordinator
         falls back to two one-way searches on any exception.
@@ -457,12 +511,11 @@ class LiveTravelAPIs:
         dep = (dep_id or origin).upper()
         arr = (arr_id or dest).upper()
 
-        outbound_date = self._normalize_outbound_date(depart_date)
-        params = {
+        base_params: dict = {
             "engine": "google_flights",
             "departure_id": dep,
             "arrival_id": arr,
-            "outbound_date": outbound_date,
+            "outbound_date": self._normalize_outbound_date(depart_date),
             "return_date": self._normalize_outbound_date(return_date),
             "type": "1",
             "currency": "USD",
@@ -470,140 +523,183 @@ class LiveTravelAPIs:
             "adults": 1,
             "api_key": self.serpapi_api_key,
         }
+        # Server-side time-of-day filter: morning outbound (4–13) AND
+        # afternoon/evening return (12–21). Round-trip format takes 4 values:
+        # "out_start,out_end,ret_start,ret_end".
+        if prefer_late_return:
+            call1_params = {**base_params, "outbound_times": "4,13,12,21"}
+        else:
+            call1_params = {**base_params, "outbound_times": "4,13"}
 
+        # ── Call 1: outbound itineraries ──────────────────────────────────────
         try:
-            resp = requests.get("https://serpapi.com/search.json", params=params, timeout=20)
-            if resp.status_code == 400 and "cannot be in the past" in resp.text.lower():
-                params["outbound_date"] = datetime.utcnow().strftime("%Y-%m-%d")
-                resp = requests.get("https://serpapi.com/search.json", params=params, timeout=20)
-            resp.raise_for_status()
-            payload = resp.json()
+            payload1 = self._serpapi_get(call1_params)
+            # If the time filter is too tight, broaden by dropping it.
+            if not (payload1.get("best_flights") or payload1.get("other_flights")):
+                if on_progress:
+                    on_progress(
+                        f"No round-trip itineraries matched outbound_times="
+                        f"{call1_params['outbound_times']} — broadening."
+                    )
+                payload1 = self._serpapi_get(base_params)
         except Exception as e:
-            raise RuntimeError(f"SerpAPI round-trip request failed: {e}") from e
+            raise RuntimeError(f"SerpAPI round-trip outbound request failed: {e}") from e
 
-        pairs: list[_RoundTripPair] = []
+        outbound_candidates: list[_FlightOption] = []
         for bucket in ("best_flights", "other_flights"):
-            for option in payload.get(bucket, []) or []:
-                out_flights = option.get("flights") or []
-                if not out_flights:
+            for option in payload1.get(bucket, []) or []:
+                flights = option.get("flights") or []
+                if not flights:
                     continue
-
-                out_first = out_flights[0]
-                out_last = out_flights[-1]
-                out_dep = (out_first.get("departure_airport") or {}).get("time", "")
-                out_arr = (out_last.get("arrival_airport") or {}).get("time", "")
-                out_airline = out_first.get("airline", "Flight")
-                out_dur = self._extract_duration_minutes(option)
-                total_price = self._parse_price(option.get("price"))
-
-                # Parse embedded return leg
-                ret_data = option.get("return_flights") or {}
-                ret_flights = ret_data.get("flights") if isinstance(ret_data, dict) else None
-                if not ret_flights and isinstance(ret_data, list) and ret_data:
-                    ret_flights = ret_data[0].get("flights") if isinstance(ret_data[0], dict) else None
-                if not ret_flights:
+                first = flights[0]
+                last = flights[-1]
+                token = option.get("departure_token")
+                if not token:
                     continue
+                outbound_candidates.append(_FlightOption(
+                    airline=first.get("airline", "Flight"),
+                    dep_time=(first.get("departure_airport") or {}).get("time", ""),
+                    arr_time=(last.get("arrival_airport") or {}).get("time", ""),
+                    price=self._parse_price(option.get("price")),
+                    duration_min=self._extract_duration_minutes(option),
+                    departure_token=token,
+                ))
 
-                ret_first = ret_flights[0]
-                ret_last = ret_flights[-1]
-                ret_dep = (ret_first.get("departure_airport") or {}).get("time", "")
-                ret_arr = (ret_last.get("arrival_airport") or {}).get("time", "")
-                ret_airline = ret_first.get("airline", "Flight")
-                ret_dur = self._extract_duration_minutes({"flights": ret_flights})
+        if not outbound_candidates:
+            raise RuntimeError("SerpAPI round-trip search returned no outbound options with departure_token")
 
-                out_opt = _FlightOption(
-                    airline=out_airline, dep_time=out_dep, arr_time=out_arr,
-                    price=total_price, duration_min=out_dur,
-                )
-                ret_opt = _FlightOption(
-                    airline=ret_airline, dep_time=ret_dep, arr_time=ret_arr,
-                    price=None, duration_min=ret_dur,
-                )
-                pairs.append(_RoundTripPair(outbound=out_opt, inbound=ret_opt, total_price=total_price))
-
-        if not pairs:
-            raise RuntimeError("SerpAPI round-trip search returned no paired options")
-
-        # Duration cap on each leg
+        # Apply duration cap + budget filter + late-return preference to pick winner outbound.
         out_cap = _duration_cap_minutes(dep, arr)
         if out_cap is not None:
-            capped = [p for p in pairs if p.outbound.duration_min is None or p.outbound.duration_min <= out_cap]
+            capped = [o for o in outbound_candidates if o.duration_min is None or o.duration_min <= out_cap]
             if capped:
-                pairs = capped
+                outbound_candidates = capped
+            elif on_progress:
+                longest = max((o.duration_min or 0) for o in outbound_candidates)
+                on_progress(
+                    f"All outbound options exceed the {out_cap}min cap "
+                    f"(longest: {longest}min). Returning best available."
+                )
 
+        if budget and budget > 0:
+            within = [o for o in outbound_candidates if o.price is None or o.price <= budget]
+            if within:
+                outbound_candidates = within
+
+        outbound_candidates.sort(key=lambda o: (o.duration_min or 10**9, o.price or 10**9))
+
+        # Pick the single best outbound; keep N runners-up for the result list.
+        top_outbounds = outbound_candidates[:max_results]
+
+        if on_progress:
+            on_progress(f"Round-trip: {len(outbound_candidates)} outbound options found; fetching return flights.")
+
+        # ── Call 2: return itineraries for the best outbound ─────────────────
+        winner = top_outbounds[0]
+        try:
+            payload2 = self._serpapi_get({**base_params, "departure_token": winner.departure_token})
+        except Exception as e:
+            raise RuntimeError(f"SerpAPI round-trip return request failed: {e}") from e
+
+        return_candidates: list[_FlightOption] = []
+        for bucket in ("best_flights", "other_flights"):
+            for option in payload2.get(bucket, []) or []:
+                flights = option.get("flights") or []
+                if not flights:
+                    continue
+                first = flights[0]
+                last = flights[-1]
+                return_candidates.append(_FlightOption(
+                    airline=first.get("airline", "Flight"),
+                    dep_time=(first.get("departure_airport") or {}).get("time", ""),
+                    arr_time=(last.get("arrival_airport") or {}).get("time", ""),
+                    price=None,
+                    duration_min=self._extract_duration_minutes(option),
+                ))
+
+        if not return_candidates:
+            raise RuntimeError("SerpAPI round-trip search returned no return options")
+
+        # Duration cap on return leg (soft).
         ret_cap = _duration_cap_minutes(arr, dep)
         if ret_cap is not None:
-            capped = [p for p in pairs if p.inbound.duration_min is None or p.inbound.duration_min <= ret_cap]
+            capped = [r for r in return_candidates if r.duration_min is None or r.duration_min <= ret_cap]
             if capped:
-                pairs = capped
-
-        # Budget filter on total round-trip price
-        if budget and budget > 0:
-            within = [p for p in pairs if p.total_price is None or p.total_price <= budget]
-            if within:
-                pairs = within
-
-        # Late-return preference on inbound leg (9.2)
-        if prefer_late_return:
-            LATE_THRESHOLD = 14 * 60
-            late = [
-                p for p in pairs
-                if (_dep_time_minutes(p.inbound.dep_time) or 0) >= LATE_THRESHOLD
-            ]
-            if late:
-                cheapest_total = min(
-                    (p.total_price for p in pairs if p.total_price is not None), default=None
+                return_candidates = capped
+            elif on_progress:
+                longest = max((r.duration_min or 0) for r in return_candidates)
+                on_progress(
+                    f"All return options exceed the {ret_cap}min cap "
+                    f"(longest: {longest}min). Returning best available."
                 )
-                best_late = min(late, key=lambda p: (p.total_price or 10**9, p.inbound.dep_time))
-                if (
-                    cheapest_total is None
-                    or best_late.total_price is None
-                    or best_late.total_price <= 1.3 * cheapest_total
-                ):
-                    pairs = [best_late] + [p for p in pairs if p is not best_late]
 
-        # Sort remaining pairs by total price + outbound duration
-        if len(pairs) > 1:
-            head, rest = pairs[0], pairs[1:]
-            rest.sort(key=lambda p: (p.total_price or 10**9, p.outbound.duration_min or 10**9))
-            pairs = [head] + rest
+        # 10.3 — Late-return preference with layered fallback: ≥14:00 → ≥11:00 → duration-first.
+        best_return: _FlightOption
+        if prefer_late_return:
+            LATE, LATE_FB = 14 * 60, 11 * 60
+            late = [r for r in return_candidates if (_dep_time_minutes(r.dep_time) or 0) >= LATE]
+            if not late:
+                late = [r for r in return_candidates if (_dep_time_minutes(r.dep_time) or 0) >= LATE_FB]
+            best_return = (
+                max(late, key=lambda r: (_dep_time_minutes(r.dep_time) or 0))
+                if late else return_candidates[0]
+            )
+        else:
+            return_candidates.sort(key=lambda r: (r.duration_min or 10**9))
+            best_return = return_candidates[0]
 
+        # ── Format output ─────────────────────────────────────────────────────
         out_strs: list[str] = []
-        ret_strs: list[str] = []
-        for pair in pairs[:max_results]:
-            out = pair.outbound
-            ret = pair.inbound
+        for o in top_outbounds:
+            seg = f"{o.airline} {o.dep_time}->{o.arr_time}"
+            dur = self._format_duration(o.duration_min)
+            if dur:
+                seg += f" Duration: {dur}"
+            if o.price is not None:
+                seg += f" Cost: ${o.price}"
+            out_strs.append(seg)
 
-            out_dur = self._format_duration(out.duration_min)
-            out_seg = f"{out.airline} {out.dep_time}->{out.arr_time}"
-            if out_dur:
-                out_seg += f" Duration: {out_dur}"
-            if out.price is not None:
-                out_seg += f" Cost: ${out.price}"
-            out_strs.append(out_seg)
+        ret_seg = f"{best_return.airline} {best_return.dep_time}->{best_return.arr_time}"
+        ret_dur = self._format_duration(best_return.duration_min)
+        if ret_dur:
+            ret_seg += f" Duration: {ret_dur}"
+        # No cost on return leg — round-trip total is on outbound (Day 1) only.
+        ret_strs = [ret_seg]
 
-            ret_dur = self._format_duration(ret.duration_min)
-            ret_seg = f"{ret.airline} {ret.dep_time}->{ret.arr_time}"
-            if ret_dur:
-                ret_seg += f" Duration: {ret_dur}"
-            # No cost on return leg — round-trip cost is on outbound (Day 1) only
-            ret_strs.append(ret_seg)
+        if on_progress:
+            on_progress(f"Round-trip: {len(out_strs)} outbound + 1 return option selected.")
 
         return out_strs, ret_strs
 
     def _resolve_with_fallback(
-        self, location: str
-    ) -> tuple[str, str | None, str | None]:
+        self, location: str,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> tuple[str, str | None, str | None, float | None, float | None]:
         """Resolve a city to an IATA code, with ≤200 mi nearest-airport fallback.
 
-        Returns (iata, fallback_city, drive_leg_summary).
+        Returns (iata, fallback_city, drive_leg_summary, lat, lon).
         fallback_city and drive_leg_summary are None when location resolves directly.
+        lat/lon are the resolved location's coordinates (airport for direct IATA;
+        city geocode for fallback) — used by search_lodging_near.
         Raises RuntimeError if no airport found within 200 mi.
         """
         # Fast path: direct IATA resolution.
         try:
             iata = self._resolve_airport_code(location)
-            return iata, None, None
+            if on_progress:
+                on_progress(f"Airport for '{location}': {iata}")
+            # Look up airport lat/lon for lodging geo search.
+            ap_lat: float | None = None
+            ap_lon: float | None = None
+            if airportsdata is not None:
+                airports = airportsdata.load("IATA")
+                meta = airports.get(iata.upper(), {})
+                try:
+                    ap_lat = float(meta["lat"])
+                    ap_lon = float(meta["lon"])
+                except (KeyError, TypeError, ValueError):
+                    pass
+            return iata, None, None, ap_lat, ap_lon
         except RuntimeError:
             pass
 
@@ -659,7 +755,13 @@ class LiveTravelAPIs:
             drive_route = f"Distance: {int(best_dist)} mi"
 
         drive_leg = f"Drive {int(best_dist)} mi to {best_code}; {drive_route}"
-        return best_code, best_city, drive_leg
+        if on_progress:
+            on_progress(
+                f"No direct airport for '{location}'; nearest is {best_code} "
+                f"({int(best_dist)} mi away) — drive transfer included."
+            )
+        # Return city lat/lon (geocoded destination) for lodging search radius.
+        return best_code, best_city, drive_leg, loc_lat, loc_lon
 
     def _resolve_airport_code(self, location: str) -> str:
         loc = (location or "").strip()

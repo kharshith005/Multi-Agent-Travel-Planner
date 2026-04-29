@@ -74,9 +74,21 @@ SINGLE_ACCOMMODATION = (
 )
 
 BUDGET_GUIDANCE = (
-    "Favour lower-cost options when the total cost approaches the traveler's "
-    "budget cap. Cite 'Cost: $N' for every priced item."
+    "The trip budget is split by FIXED ratios: transport 45%, lodging 35%, "
+    "dining 20% (see agents/budget.py). Your category cap below is computed "
+    "from this split — stay at or under it. Favour lower-cost options when "
+    "the total approaches your cap. Cite 'Cost: $N' for every priced item."
 )
+
+
+def format_cost(n: int, *, nights: int | None = None) -> str:
+    """Return a canonical cost fragment matched by the verifier/evaluator regex.
+
+    Use this instead of f-string literals to prevent regex-breaking typos.
+    """
+    if nights is not None:
+        return f"Cost: ${n} for {nights} nights"
+    return f"Cost: ${n}"
 
 
 # ── Cuisine synonyms (shared by verifier + dining-substitute fallback) ────────

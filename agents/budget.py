@@ -90,6 +90,30 @@ def derive_lodging_targets(intent: Intent) -> dict[int, int]:
     }
 
 
+def price_levels_for_nightly_target(intent: Intent) -> set[int]:
+    """Return the set of Google Maps price_level values (0–4) within the per-night lodging cap.
+
+    Used by live_apis.search_lodging_near to filter the candidate pool to
+    hotels that are actually affordable given the trip budget. Levels above
+    the target are excluded; the target itself and one level above are kept
+    to handle light over-estimates (price_level is coarse).
+    """
+    targets = derive_lodging_targets(intent)
+    if not targets:
+        return {0, 1, 2, 3, 4}  # no budget constraint — accept all tiers
+
+    avg = targets.get(2, 0)  # level-2 is the baseline "average" tier
+
+    # Include all levels whose estimated cost is ≤ 1.5× the average per-night cap.
+    ceiling = avg * 1.5
+    accepted: set[int] = set()
+    for level, cost in targets.items():
+        if cost <= ceiling:
+            accepted.add(level)
+
+    return accepted or {0, 1, 2, 3, 4}
+
+
 def derive_transport_target(intent: Intent) -> int:
     """One-way flight budget target: half of the total transport cap."""
     caps = allocate(intent)

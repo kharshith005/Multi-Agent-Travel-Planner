@@ -154,14 +154,15 @@ def _call(intent: Intent, ctx: ToolContext, tool_results: str, repair_note: str)
     windows = format_trip_windows(ctx)
     cap = _format_dining_cap(ctx, intent)
     user = (
-        f"Intent: {intent.model_dump_json()}\n\n"
+        f"Intent: {intent.for_specialist('dining')}\n\n"
         f"Restaurants in {intent.dest}:\n{tool_results}\n\n"
         + (windows + "\n\n" if windows else "")
         + (cap + "\n\n" if cap else "")
         + (f"Repair note: {repair_note}\n\n" if repair_note else "")
         + f"Produce a DiningPlan covering days 1..{intent.days}."
     )
-    return call_json(SYSTEM, user, DiningPlan, think_first=True)
+    think = bool(repair_note)
+    return call_json(SYSTEM, user, DiningPlan, max_tokens=1500, think_first=think)
 
 
 def _format_tool_context(ctx: ToolContext) -> str:

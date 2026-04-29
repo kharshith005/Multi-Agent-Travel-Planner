@@ -35,7 +35,7 @@ def test_resolve_direct_iata_passthrough():
         return "JFK"
 
     api._resolve_airport_code = fake_resolve
-    iata, fc, leg = api._resolve_with_fallback("JFK")
+    iata, fc, leg, lat, lon = api._resolve_with_fallback("JFK")
     assert iata == "JFK"
     assert fc is None
     assert leg is None
@@ -49,7 +49,7 @@ def test_resolve_known_city_resolves_directly():
         return "ATL"
 
     api._resolve_airport_code = fake_resolve
-    iata, fc, leg = api._resolve_with_fallback("Atlanta")
+    iata, fc, leg, _lat, _lon = api._resolve_with_fallback("Atlanta")
     assert iata == "ATL"
     assert fc is None
 
@@ -76,12 +76,14 @@ def test_resolve_fallback_picks_nearest_within_200mi():
     api._client = lambda: _fake_client(fake_geocode)
     api.route_summary = lambda *a, **k: "Distance: 30 mi, Duration: 40m"
 
-    iata, fc, leg = api._resolve_with_fallback("Small Town NC")
+    iata, fc, leg, lat, lon = api._resolve_with_fallback("Small Town NC")
     assert iata is not None
     assert _IATA_RE.match(iata)
     assert fc is not None
     assert leg is not None
     assert "Drive" in leg
+    assert lat is not None
+    assert lon is not None
 
 
 def test_resolve_fallback_raises_when_no_airport_in_radius():
