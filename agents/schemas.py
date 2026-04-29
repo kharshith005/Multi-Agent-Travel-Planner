@@ -269,6 +269,7 @@ class ToolContext(TypedDict, total=False):
     hotels: list[dict]                 # raw Places API rows
     restaurants: list[dict]            # raw Places API rows
     attractions: list[dict]            # raw Places API rows
+    dest_cities: list[str]             # individual cities when dest is a multi-city state
     trip_windows: TripWindows          # populated after transport specialist runs
     category_caps: dict[str, int]      # per-category budget caps (paper §4.3)
     meal_cost_targets: dict[int, int]  # price_level → estimated meal cost

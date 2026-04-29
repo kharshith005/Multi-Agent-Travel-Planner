@@ -112,7 +112,7 @@ def _past_dates(dates: list[str]) -> list[str]:
     return out
 
 
-REPAIR_MAX_ROUNDS = 3
+REPAIR_MAX_ROUNDS = 2
 
 
 class CoordinatorState(TypedDict, total=False):
@@ -751,10 +751,11 @@ def _build_graph(
                 + " — transport specialist will use driving/taxi fallback."
             )
 
-        # ── Candidate pool scaled to trip length ─────────────────────────────
-        n_hotels      = min(20, max(8,  intent.days * 2))
-        n_restaurants = min(40, max(12, intent.days * 4))
-        n_attractions = min(30, max(12, intent.days * 3))
+        # ── Candidate pool scaled to trip length and constraint specificity ──
+        cuisine_count = len([c for c in (intent.cuisine or "").split(",") if c.strip()])
+        n_hotels      = min(25, max(15, intent.days * 3))
+        n_restaurants = min(50, max(16, intent.days * 4 + cuisine_count * 4))
+        n_attractions = min(35, max(16, intent.days * 4))
 
         # Destination data — live only. The live planner never falls back to
         # sandbox: a missing live result must surface as an error so the user
@@ -1056,9 +1057,12 @@ def _build_graph(
                     continue
 
             if v.responsible == "coordinator":
-                # coordinator-level violations (e.g., missing_cost, completeness) touch
-                # whichever specialist owns the missing field; rerun all as a safe default.
-                rerun.update({"transport", "lodging", "dining", "sightseeing"})
+                # coordinator-level violations (complete_information, missing_cost)
+                # are mechanical — no single specialist owns them and an LLM re-run
+                # of all 4 rarely fixes them while wasting 3-4 calls per round.
+                # Skip the LLM rerun; the mechanical pre-repair pass above handles
+                # diversity; cost/completeness issues surface in the repair note.
+                pass
             elif v.responsible in {"transport", "lodging", "dining", "sightseeing"}:
                 rerun.add(v.responsible)
 
@@ -1165,8 +1169,17 @@ def plan_trip(
     tool_context           — pre-built ToolContext (e.g., from sandbox); research skipped.
     model                  — override the active model (falls back to LLM_MODEL env or default).
     """
-    from agents.models import default_model_id
+    from agents.models import default_model_id, get_model
     model_id = model or current_model() or default_model_id()
+
+    # Claude Vertex quota (TPM/RPM) is tight; parallel fan-out spikes usage and
+    # triggers 429s. Force sequential execution so specialists queue their calls.
+    try:
+        _provider = get_model(model_id).provider
+    except KeyError:
+        _provider = "unknown"
+    if _provider == "claude" and execution_mode == "parallel":
+        execution_mode = "sequential"
 
     mode = "sequential" if execution_mode == "sequential" else "parallel"
     app = _build_graph(

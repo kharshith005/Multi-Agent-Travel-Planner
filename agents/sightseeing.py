@@ -47,16 +47,8 @@ def run(intent: Intent, tool_context: ToolContext, repair_note: str = "") -> Sig
     allowed = _allowed_names(tool_context)
     plan = _call(intent, tool_context, tool_results, repair_note)
     invalid = _invalid_names(plan, allowed)
-    if invalid:
-        retry_note = (
-            f"{repair_note} "
-            f"Your previous plan referenced attractions NOT in the allowed list: {sorted(invalid)}. "
-            "Every attraction MUST be copied verbatim from the numbered tool results above."
-        ).strip()
-        plan = _call(intent, tool_context, tool_results, retry_note)
-        still_invalid = _invalid_names(plan, allowed)
-        if still_invalid and allowed:
-            plan = _substitute_attractions(plan, allowed, intent.dest)
+    if invalid and allowed:
+        plan = _substitute_attractions(plan, allowed, intent.dest)
     return plan
 
 
@@ -101,28 +93,50 @@ def _substitute_attractions(plan: SightseeingPlan, allowed: set[str], city: str)
     return plan
 
 
+def _multicity_hint(ctx: ToolContext, intent: Intent) -> str:
+    cities = ctx.get("dest_cities") or []
+    if len(cities) <= 1:
+        return ""
+    city_list = ", ".join(cities)
+    days_each = max(1, intent.days // len(cities))
+    return (
+        f"MULTI-CITY TRIP: Cities in order: {city_list}. "
+        f"Spend roughly {days_each} day(s) per city. "
+        f"Only assign attractions from the city where each day is spent."
+    )
+
+
 def _call(intent: Intent, ctx: ToolContext, tool_results: str, repair_note: str) -> SightseeingPlan:
     windows = format_trip_windows(ctx)
+    mc_hint = _multicity_hint(ctx, intent)
+    dest_label = intent.dest if not ctx.get("dest_cities") else (
+        f"{intent.dest} (cities: {', '.join(ctx['dest_cities'])})"
+    )
     user = (
         f"Intent: {intent.for_specialist('sightseeing')}\n\n"
-        f"Attractions in {intent.dest}:\n{tool_results}\n\n"
+        f"Attractions in {dest_label}:\n{tool_results}\n\n"
+        + (mc_hint + "\n\n" if mc_hint else "")
         + (windows + "\n\n" if windows else "")
         + (f"Repair note: {repair_note}\n\n" if repair_note else "")
         + f"Produce a SightseeingPlan covering days 1..{intent.days}."
     )
     think = bool(repair_note)
-    return call_json(SYSTEM, user, SightseeingPlan, max_tokens=800, think_first=think)
+    return call_json(SYSTEM, user, SightseeingPlan, max_tokens=2400, think_first=think)
 
 
 def _format_tool_context(intent: Intent, ctx: ToolContext) -> str:
     rows = ctx.get("attractions") or []
     if not rows:
         return "(none)"
-    lines = [f"Live API attractions in {intent.dest}:"]
+    dest_label = intent.dest if not ctx.get("dest_cities") else (
+        f"{intent.dest} (cities: {', '.join(ctx['dest_cities'])})"
+    )
+    lines = [f"Live API attractions in {dest_label}:"]
     for i, r in enumerate(rows, start=1):
-        lines.append(
-            f"  [{i}] {r.get('name')} | rating:{r.get('rating')}"
-        )
+        parts = [f"  [{i}] {r.get('name')}", f"rating:{r.get('rating')}"]
+        if r.get("city"):
+            parts.append(f"city:{r['city']}")
+        lines.append(" | ".join(parts))
     return "\n".join(lines)
 
 

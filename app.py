@@ -21,6 +21,11 @@ from baseline.single_agent import plan_trip_single
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
+def _escape_dollars(text: str) -> str:
+    """Escape $ so Streamlit markdown doesn't render pairs as LaTeX math."""
+    return text.replace("$", r"\$")
+
+
 # --------- page ---------
 st.set_page_config(page_title="Multi-Agent Travel Planner", layout="wide")
 st.title("Multi-Agent Travel Itinerary Planner")
@@ -81,9 +86,37 @@ with st.sidebar:
         selected_model_id = _model_id_map[_selected_name]
         if st.session_state.get("_last_model_id") != selected_model_id:
             st.session_state["_last_model_id"] = selected_model_id
+            st.session_state.pop("_preflight_ok", None)  # force re-check on model change
     else:
         st.warning("No models available. Run scripts/validate_env.py to check configuration.")
         selected_model_id = _default_id
+
+    # Pre-flight API validation — runs once per model, result cached in session.
+    if "_preflight_ok" not in st.session_state:
+        with st.spinner("Verifying API connection..."):
+            try:
+                from agents.llm import call_text
+                from agents.runtime import use_model
+                with use_model(selected_model_id):
+                    call_text("You are a validator.", "Reply with: ok", max_tokens=8)
+                st.session_state["_preflight_ok"] = True
+                st.session_state.pop("_preflight_error", None)
+            except Exception as _pf_exc:
+                st.session_state["_preflight_ok"] = False
+                st.session_state["_preflight_error"] = str(_pf_exc)
+
+    if not st.session_state.get("_preflight_ok", True):
+        _pf_err = st.session_state.get("_preflight_error", "unknown error")
+        if "429" in _pf_err or "quota" in _pf_err.lower():
+            st.warning(
+                f"**{selected_model_id}** quota exhausted on Vertex. "
+                "Wait a few minutes or pick a different model."
+            )
+        else:
+            st.error(
+                f"Cannot reach **{selected_model_id}**: {_pf_err}\n\n"
+                "Check `.env` — see `.env.example` for required keys."
+            )
 
 
 
@@ -176,7 +209,7 @@ def _render_field(label: str, field_key: str, value: object, day_no: int, total_
         st.markdown(f"**{label}:** {display_text}")
         st.caption(f"Reason: {reason}")
         return
-    st.markdown(f"**{label}:** {clean}")
+    st.markdown(f"**{label}:** {_escape_dollars(clean)}")
 
 
 def _val(text: object) -> str:
@@ -258,7 +291,7 @@ def render_plan(
                 if _is_missing_text(day.transportation):
                     st.caption(_empty_display_text("transportation", day.days, total_days))
                 else:
-                    st.markdown(_val(day.transportation))
+                    st.markdown(_escape_dollars(_val(day.transportation)))
 
             with col_s:
                 st.markdown("**📅 Schedule**")
@@ -271,7 +304,7 @@ def render_plan(
                             f":gray[{_empty_display_text(field, day.days, total_days)}]"
                         )
                     else:
-                        st.markdown(f"{icon} **{label}:** {clean}")
+                        st.markdown(f"{icon} **{label}:** {_escape_dollars(clean)}")
 
                 _sched_row("🍳", "Breakfast", "breakfast", day.breakfast)
                 _sched_row("🥗", "Lunch", "lunch", day.lunch)
@@ -283,7 +316,7 @@ def render_plan(
                 if _is_missing_text(day.accommodation):
                     st.caption(_empty_display_text("accommodation", day.days, total_days))
                 else:
-                    st.markdown(_val(day.accommodation))
+                    st.markdown(_escape_dollars(_val(day.accommodation)))
 
 
 def _missing_details(query: str) -> tuple[list[str], Intent | None]:
@@ -314,7 +347,7 @@ def render_verifier(report: VerifierReport) -> None:
             for agent, vlist in by_agent.items():
                 st.markdown(f"**{agent.title()} specialist**")
                 for v in vlist:
-                    st.markdown(f"  - `{v.rule}`: {v.detail}")
+                    st.markdown(f"  - `{v.rule}`: {_escape_dollars(v.detail)}")
 
 
 # --------- chat input ---------

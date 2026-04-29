@@ -62,17 +62,6 @@ REGISTRY: list[ModelEntry] = [
         est_latency_ms_per_call=900,
     ),
     ModelEntry(
-        id="gemini-2.0-flash",
-        display_name="Gemini 2.0 Flash",
-        provider="gemini",
-        tier="standard",
-        family="gemini-2.0",
-        default_temperature=0.0,
-        est_relative_cost=2.5,
-        auth_mode="vertex_api_key",
-        est_latency_ms_per_call=700,
-    ),
-    ModelEntry(
         id="claude-haiku-4-5@20251001",
         display_name="Claude Haiku 4.5",
         provider="claude",
@@ -84,30 +73,6 @@ REGISTRY: list[ModelEntry] = [
         available_regions=("global",),
         est_latency_ms_per_call=500,
     ),
-    ModelEntry(
-        id="claude-sonnet-4-5@20250929",
-        display_name="Claude Sonnet 4.5",
-        provider="claude",
-        tier="standard",
-        family="claude-4",
-        default_temperature=0.0,
-        est_relative_cost=37.0,
-        auth_mode="vertex_adc",
-        available_regions=("global",),
-        est_latency_ms_per_call=1200,
-    ),
-    ModelEntry(
-        id="claude-sonnet-4-6@20251101",
-        display_name="Claude Sonnet 4.6",
-        provider="claude",
-        tier="standard",
-        family="claude-4",
-        default_temperature=0.0,
-        est_relative_cost=37.0,
-        auth_mode="vertex_adc",
-        available_regions=("global",),
-        est_latency_ms_per_call=1200,
-    ),
 ]
 
 _REGISTRY_BY_ID: dict[str, ModelEntry] = {m.id.split("@", 1)[0]: m for m in REGISTRY}
@@ -115,7 +80,8 @@ _REGISTRY_BY_ID: dict[str, ModelEntry] = {m.id.split("@", 1)[0]: m for m in REGI
 
 def get_model(model_id: str) -> ModelEntry:
     """Look up a model by ID. Raises KeyError if not found."""
-    entry = _REGISTRY_BY_ID.get(model_id)
+    bare = model_id.split("@", 1)[0]
+    entry = _REGISTRY_BY_ID.get(bare)
     if entry is None:
         raise KeyError(
             f"Model {model_id!r} not in registry. Available: {sorted(_REGISTRY_BY_ID)}"

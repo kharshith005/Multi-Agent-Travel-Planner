@@ -31,6 +31,11 @@ except ImportError:
 
 T = TypeVar("T", bound=BaseModel)
 
+
+class TruncationError(RuntimeError):
+    """Raised when the model response is truncated before the JSON object closes."""
+
+
 # ── efficiency tracking ──────────────────────────────────────────────────────
 
 _stats_lock = threading.Lock()
@@ -130,6 +135,8 @@ def _cache_put(key: str, value: str, *, _write_disk: bool = True) -> None:
 # ── retry ─────────────────────────────────────────────────────────────────────
 
 _MAX_ATTEMPTS = 3
+# 429 quota exhaustion needs much longer waits; Vertex TPM buckets refill over ~60s.
+_MAX_ATTEMPTS_429 = 6
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 _RETRY_HINTS = (
     "rate_limit",
@@ -166,17 +173,31 @@ def _backoff(attempt: int) -> float:
     return min(2 ** attempt, 12) + random.uniform(0, 0.75)
 
 
+def _backoff_429(attempt: int) -> float:
+    # 15s, 30s, 60s, 90s, 90s, 90s — ~6 min total; gives Vertex TPM quota time to refill.
+    return min(15 * (2 ** attempt), 90) + random.uniform(0, 5)
+
+
 def _with_retry(fn, *, max_attempts: int = _MAX_ATTEMPTS):
     last_exc: Exception | None = None
-    for attempt in range(max_attempts):
+    effective_max = max_attempts
+    attempt = 0
+    while attempt < effective_max:
         try:
             return fn()
         except Exception as e:
             last_exc = e
             if not _is_retryable(e):
                 raise
-            delay = _parse_retry_after(e) or _backoff(attempt)
+            status = getattr(e, "status_code", None)
+            # On first 429 hit, escalate to the longer quota-recovery policy.
+            if status == 429 and effective_max == max_attempts:
+                effective_max = _MAX_ATTEMPTS_429
+            delay = _parse_retry_after(e) or (
+                _backoff_429(attempt) if status == 429 else _backoff(attempt)
+            )
             time.sleep(delay)
+            attempt += 1
     raise last_exc  # type: ignore[misc]
 
 
@@ -249,6 +270,8 @@ def call_json(
         _stats["cache_misses"] += 1
 
     provider = _provider_for(model_id)
+    _MAX_TOKENS_CAP = 32768
+    cur_max = [effective_max]  # mutable so the retry loop can escalate on truncation
 
     def do_call() -> str:
         from agents.providers import call_provider
@@ -258,14 +281,14 @@ def call_json(
         if provider == "claude":
             text, in_tok, out_tok = call_provider(
                 model_entry, prompt_system, user,
-                max_tokens=effective_max,
+                max_tokens=cur_max[0],
                 json_mode=True,
                 schema_cls=schema_cls,
             )
         else:
             text, in_tok, out_tok = call_provider(
                 model_entry, prompt_system, user,
-                max_tokens=effective_max,
+                max_tokens=cur_max[0],
                 json_mode=use_json_mode,
                 schema_cls=None,
             )
@@ -285,7 +308,24 @@ def call_json(
             raise err
         return text
 
-    raw = _with_retry(do_call)
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_ATTEMPTS):
+        try:
+            raw = do_call()
+            break
+        except TruncationError as e:
+            last_exc = e
+            # Double the token budget for the next attempt; don't sleep.
+            cur_max[0] = min(cur_max[0] * 2, _MAX_TOKENS_CAP)
+        except Exception as e:
+            last_exc = e
+            if not _is_retryable(e):
+                raise
+            delay = _parse_retry_after(e) or _backoff(attempt)
+            time.sleep(delay)
+    else:
+        raise last_exc  # type: ignore[misc]
+
     _cache_put(key, raw)
     return schema_cls.model_validate_json(raw)
 
@@ -345,7 +385,7 @@ def _extract_json(text: str) -> str:
                     setattr(err, "status_code", 503)
                     raise err
                 return body
-    err = RuntimeError(
+    err = TruncationError(
         "LLM response was truncated before the JSON object was closed "
         f"(got {len(text)} chars). Increase max_tokens or reduce input size."
     )

@@ -3,8 +3,6 @@
 Architectural reference for the Multi-Agent Travel Itinerary Planner (current state post-Phases 1–13).
 
 Companion documents:
-- `PLAN_MULTI_MODEL.md` — engineering execution plan for multi-model + latency + per-model TravelPlanner comparison.
-- `PLAN_REPORT_BLOCKERS.md` — per-phase change log; tracks what was fixed and why.
 - `../PROJECT_REPORT_PLAN.md` — paper-aligned analysis (Paper 1: TravelPlanner) and report structure.
 
 ---

@@ -20,6 +20,14 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATASET_DIR = REPO_ROOT / "Dataset"
+_STATE_INDEX_PATH = Path(__file__).resolve().parents[1] / "eval" / "state_city_index.json"
+
+
+@lru_cache(maxsize=1)
+def _load_state_index() -> dict[str, list[str]]:
+    if _STATE_INDEX_PATH.exists():
+        return json.loads(_STATE_INDEX_PATH.read_text(encoding="utf-8"))
+    return {}
 
 
 # ----- parsing helpers -----
@@ -117,6 +125,21 @@ class Sandbox:
 
     def accommodation_search(self, city: str) -> list[dict]:
         return list(self.accommodations.get(city, []))
+
+    def cities_in(self, location: str) -> list[str]:
+        """Return the destination cities for a TravelPlanner location string.
+
+        If `location` is a known city (has sandbox data), returns [location].
+        If it is a US state, returns the cities from the state index.
+        Falls back to [location] when neither match is found.
+        """
+        if (location in self.attractions or location in self.restaurants
+                or location in self.accommodations):
+            return [location]
+        state_cities = _load_state_index().get(location)
+        if state_cities:
+            return list(state_cities)
+        return [location]
 
     # ----- introspection -----
     def stats(self) -> dict[str, int]:

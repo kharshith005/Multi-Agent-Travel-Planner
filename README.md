@@ -5,12 +5,11 @@ A coordinator-led multi-agent system for travel-itinerary planning. A Streamlit 
 CSE 572 Spring 2026 final project — inspired by **Xie et al. (2024), TravelPlanner: A Benchmark for Real-World Planning with Language Agents** (arXiv:2402.01622). The paper shows GPT-4-Turbo + ReAct hits **0.6%** final pass rate on the TravelPlanner benchmark; the goal here is a multi-agent counter-design that closes that gap.
 
 **Documents in this directory:**
-- [ARCHITECTURE.md](ARCHITECTURE.md) — current architecture + planned multi-provider LLM layer.
-- [PLAN_MULTI_MODEL.md](PLAN_MULTI_MODEL.md) — engineering execution plan for multi-model support, latency validation, and per-model TravelPlanner comparison.
+- [ARCHITECTURE.md](ARCHITECTURE.md) — system architecture reference.
 
 **Workspace-level documents** (one directory up):
 - `../PROJECT_REPORT_PLAN.md` — paper-aligned analysis and report structure.
-- `../CODE_PLAN_MULTI_MODEL.md` — full how/why with provider-auth deep dive.
+- `../CODE_PLAN_MULTI_MODEL.md` — multi-model and provider-auth background.
 - `../CLAUDE.md` — repo conventions for Claude Code sessions.
 
 ---
@@ -31,12 +30,12 @@ cp .env.example .env               # then edit .env and fill in your keys
 
 `.env` is gitignored. Runtime is **strict** — missing keys or API failures surface as errors, not silent fallbacks.
 
-### Optional: Claude on Vertex AI (planned, see PLAN_MULTI_MODEL.md)
+### Optional: Claude on Vertex AI
 
-If/when Claude support lands, additional vars are required:
+Additional vars required for Claude models:
 
 - `GOOGLE_CLOUD_PROJECT` — GCP project with Vertex AI billing enabled and Anthropic Model Garden terms accepted.
-- `CLAUDE_VERTEX_REGION` — e.g. `us-east5` (regions vary by Claude SKU).
+- `CLAUDE_VERTEX_REGION` — e.g. `global` (region varies by Claude SKU).
 - `GOOGLE_APPLICATION_CREDENTIALS` — path to a service-account JSON for headless eval, OR run `gcloud auth application-default login` for interactive use.
 
 When these are not set, Claude options are filtered out of the model picker and the system runs Gemini-only with no behavior change.
@@ -46,7 +45,7 @@ When these are not set, Claude options are filtered out of the model picker and 
 | Provider | On Vertex AI | Status |
 |---|---|---|
 | **Gemini** | yes | Wired up (current default) |
-| **Claude** | yes (Anthropic-Vertex partnership) | Planned — see PLAN_MULTI_MODEL.md |
+| **Claude** | yes (Anthropic-Vertex partnership) | Supported via `agents/providers/claude.py` |
 | **GPT/OpenAI** | **no** | Excluded — not hosted on Vertex AI |
 
 GPT models are intentionally not supported. They are not available on Vertex AI; using them would require OpenAI direct or Azure OpenAI Service, which is out of scope for this project.
@@ -88,7 +87,7 @@ python -m eval.run_eval --split validation --system multi --llm-cache-dir .cache
 
 `--system` accepts: `multi` (full multi-agent), `single` (single-agent baseline), `no_verify`, `no_specialization`, `annotated` (sanity check), `both` (multi + single), `all` (multi + single + no_verify + no_specialization).
 
-After Phase 3 of `PLAN_MULTI_MODEL.md`, additional flags become available:
+Additional flags:
 - `--model <id>` — run on a specific registered model.
 - `--models all` or `--models id1,id2,...` — sweep multiple models in one invocation.
 - `--cooldown-seconds N` — sleep between models to manage Vertex quotas.

@@ -145,10 +145,19 @@ def generate(
         raise
     except Exception as e:
         status = getattr(e, "status_code", None)
-        err = RuntimeError(
-            f"Claude request failed ({status or 'error'}): {e}. "
-            "Check GOOGLE_CLOUD_PROJECT, CLAUDE_VERTEX_REGION (e.g. global), and ADC configuration."
-        )
+        if status == 429:
+            err = RuntimeError(
+                f"Claude on Vertex quota exhausted "
+                f"(region={_region()}, project={_project()}). "
+                "Increase quota at https://console.cloud.google.com/iam-admin/quotas "
+                "(filter: aiplatform.googleapis.com online_prediction_requests_per_base_model) "
+                "or set a different region with CLAUDE_VERTEX_REGION."
+            )
+        else:
+            err = RuntimeError(
+                f"Claude request failed ({status or 'error'}): {e}. "
+                "Check GOOGLE_CLOUD_PROJECT, CLAUDE_VERTEX_REGION (e.g. global), and ADC configuration."
+            )
         setattr(err, "status_code", status)
         raise err from e
 

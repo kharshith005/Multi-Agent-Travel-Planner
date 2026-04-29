@@ -126,11 +126,15 @@ def evaluate(plan: FullPlan, intent: Intent, sandbox: Sandbox) -> ConstraintRepo
     )
 
     # ---- within current city ----
-    # Venues must be in the destination city for every day. All days in our
-    # single-destination planner are at intent.dest (day-1 and last-day travel
-    # legs start/end there; activities are always at dest).
-    dest_attr_names = {r.get("Name") for r in sandbox.attraction_search(intent.dest)}
-    dest_rest_names = {r.get("Name") for r in sandbox.restaurant_search(intent.dest)}
+    # Venues must be in the destination city (or any visited city for multi-city
+    # state-destination queries). Expand state names to their constituent cities
+    # so plans that correctly use city-level venues aren't penalised.
+    dest_cities = sandbox.cities_in(intent.dest) or [intent.dest]
+    dest_attr_names: set[str] = set()
+    dest_rest_names: set[str] = set()
+    for _dc in dest_cities:
+        dest_attr_names.update(r.get("Name") for r in sandbox.attraction_search(_dc))
+        dest_rest_names.update(r.get("Name") for r in sandbox.restaurant_search(_dc))
     cs["within_current_city"] = (
         (all(n in dest_attr_names for n in attrs) if attrs else True)
         and (all(n in dest_rest_names for n in rests) if rests else True)

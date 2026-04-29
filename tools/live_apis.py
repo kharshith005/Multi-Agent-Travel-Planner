@@ -35,6 +35,43 @@ except ImportError:
 
 _IATA_RE = re.compile(r"^[A-Z]{3}$")
 
+# Common multi-airport metros and cities whose airportsdata city field doesn't
+# match the colloquial name (e.g. "New York City" vs. city="New York").
+# Checked before substring search so ambiguous names never land on seaplane bases.
+_CITY_AIRPORT_ALIASES: dict[str, list[str]] = {
+    "new york":         ["JFK", "LGA", "EWR"],
+    "new york city":    ["JFK", "LGA", "EWR"],
+    "nyc":              ["JFK", "LGA", "EWR"],
+    "washington":       ["IAD", "DCA", "BWI"],
+    "washington dc":    ["IAD", "DCA", "BWI"],
+    "washington d.c.":  ["IAD", "DCA", "BWI"],
+    "chicago":          ["ORD", "MDW"],
+    "houston":          ["IAH", "HOU"],
+    "dallas":           ["DFW", "DAL"],
+    "fort worth":       ["DFW"],
+    "los angeles":      ["LAX", "BUR", "LGB", "SNA"],
+    "san francisco":    ["SFO", "OAK", "SJC"],
+    "miami":            ["MIA", "FLL"],
+    "boston":           ["BOS"],
+    "seattle":          ["SEA"],
+    "denver":           ["DEN"],
+    "atlanta":          ["ATL"],
+    "phoenix":          ["PHX"],
+    "minneapolis":      ["MSP"],
+    "detroit":          ["DTW"],
+    "orlando":          ["MCO"],
+    "london":           ["LHR", "LGW", "STN", "LCY"],
+    "paris":            ["CDG", "ORY"],
+    "tokyo":            ["HND", "NRT"],
+    "osaka":            ["KIX", "ITM"],
+}
+
+# Name substrings that identify non-commercial fields with no scheduled service.
+_NON_COMMERCIAL_TAGS = (
+    "seaplane", " spb", "heliport", "helipad", "heli ",
+    "airpark", " strip", "float plane", "floatplane",
+)
+
 
 def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Great-circle distance in statute miles between two (lat, lon) points."""
@@ -323,6 +360,11 @@ class LiveTravelAPIs:
             out.append(seg)
 
         if not out:
+            if on_progress:
+                on_progress(
+                    f"SerpAPI has no Google Flights inventory for "
+                    f"{dep_id}↔{arr_id} — airport may lack scheduled service."
+                )
             raise RuntimeError("SerpAPI flights returned no options")
         return out
 
@@ -659,15 +701,21 @@ class LiveTravelAPIs:
                 seg += f" Cost: ${o.price}"
             out_strs.append(seg)
 
-        ret_seg = f"{best_return.airline} {best_return.dep_time}->{best_return.arr_time}"
-        ret_dur = self._format_duration(best_return.duration_min)
-        if ret_dur:
-            ret_seg += f" Duration: {ret_dur}"
-        # No cost on return leg — round-trip total is on outbound (Day 1) only.
-        ret_strs = [ret_seg]
+        # Emit up to max_results return options: best_return at index 0, rest as runners-up.
+        # No cost on return legs — round-trip total is attributed to outbound (Day 1) only.
+        ordered_returns = [best_return] + [r for r in return_candidates if r is not best_return]
+        ret_strs: list[str] = []
+        for r in ordered_returns[:max_results]:
+            seg = f"{r.airline} {r.dep_time}->{r.arr_time}"
+            dur = self._format_duration(r.duration_min)
+            if dur:
+                seg += f" Duration: {dur}"
+            ret_strs.append(seg)
 
         if on_progress:
-            on_progress(f"Round-trip: {len(out_strs)} outbound + 1 return option selected.")
+            on_progress(
+                f"Round-trip: {len(out_strs)} outbound + {len(ret_strs)} return option(s) selected."
+            )
 
         return out_strs, ret_strs
 
@@ -731,6 +779,10 @@ class LiveTravelAPIs:
                 continue
             if meta.get("country") != "US":
                 continue
+            # Skip seaplane bases, heliports, and private airparks — no scheduled service.
+            name_lower = str(meta.get("name", "")).lower()
+            if any(tag in name_lower for tag in _NON_COMMERCIAL_TAGS):
+                continue
             try:
                 ap_lat = float(meta["lat"])
                 ap_lon = float(meta["lon"])
@@ -772,6 +824,12 @@ class LiveTravelAPIs:
 
         airports = airportsdata.load("IATA")
         target = self._norm(loc)
+
+        # Alias map: resolves metros whose airportsdata city field doesn't match
+        # the colloquial name, and prevents seaplane-base false positives.
+        if target in _CITY_AIRPORT_ALIASES:
+            return _CITY_AIRPORT_ALIASES[target][0]
+
         matches: list[tuple[str, str, str]] = []
         for code, meta in airports.items():
             if not code or not _IATA_RE.match(code):

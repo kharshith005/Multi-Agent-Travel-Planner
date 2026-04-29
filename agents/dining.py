@@ -25,9 +25,11 @@ SYSTEM = (
     f"- {ARRIVAL_DAY_RULE}\n"
     f"- {DEPARTURE_DAY_RULE}\n"
     f"- {NO_REPEAT_RESTAURANTS}\n"
-    "- Respect the traveler's cuisine constraint if present — at least one meal "
-    "per requested cuisine must be from a restaurant whose name or the "
-    "provided tags clearly reflect that cuisine.\n"
+    "- **CUISINE CONSTRAINT**: If `intent.cuisine` is set (may be comma-separated "
+    "for multiple cuisines), at least one meal per requested cuisine must come from "
+    "a restaurant whose `cuisines` tag contains that cuisine. Match against the "
+    "explicit `cuisines` field in the tool results — do NOT guess from the "
+    "restaurant name alone.\n"
     f"- {BUDGET_GUIDANCE}\n"
     "- Every non-'-' meal MUST carry a 'Cost: $N' fragment.\n"
     "- Follow the Flight timing YES/NO grid exactly when present — set any meal "
@@ -53,17 +55,8 @@ def run(intent: Intent, tool_context: ToolContext, repair_note: str = "") -> Din
     allowed = _allowed_names(tool_context)
     plan = _call(intent, tool_context, tool_results, repair_note)
     invalid = _invalid_names(plan, allowed)
-    if invalid:
-        # One retry with a stricter grounding note before giving up.
-        retry_note = (
-            f"{repair_note} "
-            f"Your previous plan referenced restaurants NOT in the allowed list: {sorted(invalid)}. "
-            "Every restaurant MUST be copied verbatim from the numbered tool results above."
-        ).strip()
-        plan = _call(intent, tool_context, tool_results, retry_note)
-        still_invalid = _invalid_names(plan, allowed)
-        if still_invalid and allowed:
-            plan = _substitute_restaurants(plan, allowed, intent, tool_context)
+    if invalid and allowed:
+        plan = _substitute_restaurants(plan, allowed, intent, tool_context)
     return plan
 
 
@@ -78,7 +71,7 @@ def _substitute_restaurants(
     Also never reuses a name (preserves `diverse_restaurants`).
     """
     cuisine_tokens = _cuisine_tokens(intent.cuisine or "")
-    pool = _prioritised_pool(allowed, cuisine_tokens)
+    pool = _prioritised_pool(allowed, cuisine_tokens, ctx)
     used: set[str] = set()
     for d in plan.days:
         for meal in (d.breakfast, d.lunch, d.dinner):
@@ -133,36 +126,69 @@ def _cuisine_tokens(cuisine: str) -> list[str]:
     return out
 
 
-def _prioritised_pool(allowed: set[str], cuisine_tokens: list[str]) -> list[str]:
+def _prioritised_pool(
+    allowed: set[str], cuisine_tokens: list[str], ctx: ToolContext | None = None
+) -> list[str]:
     """Return the allowed pool sorted so cuisine-matching names come first.
-    Stable within each group for deterministic substitution.
+
+    When `ctx` is provided, cuisine matching uses the explicit `cuisines` field
+    from the restaurant record (more accurate). Falls back to name-keyword match.
     """
     if not cuisine_tokens:
         return sorted(allowed)
+
+    # Build a name→cuisines_text lookup from ctx when available.
+    cuisines_by_name: dict[str, str] = {}
+    if ctx:
+        for r in (ctx.get("restaurants") or []):
+            name = (r.get("name") or "").strip()
+            cuisines_field = (r.get("cuisines") or "").lower()
+            if name:
+                cuisines_by_name[name] = cuisines_field
+
     matching: list[str] = []
     other: list[str] = []
     for name in sorted(allowed):
-        lc = name.lower()
-        if any(tok in lc for tok in cuisine_tokens):
+        cuisines_text = cuisines_by_name.get(name, name.lower())
+        if any(tok in cuisines_text for tok in cuisine_tokens):
             matching.append(name)
         else:
             other.append(name)
     return matching + other
 
 
+def _multicity_hint(ctx: ToolContext, intent: Intent) -> str:
+    cities = ctx.get("dest_cities") or []
+    if len(cities) <= 1:
+        return ""
+    city_list = ", ".join(cities)
+    days_each = max(1, intent.days // len(cities))
+    return (
+        f"MULTI-CITY TRIP: Visit cities in this order: {city_list}. "
+        f"Spend roughly {days_each} day(s) per city. "
+        f"Set `city` in each day's output to the city where that day is spent. "
+        f"Each restaurant must be in the same city as the day it appears on."
+    )
+
+
 def _call(intent: Intent, ctx: ToolContext, tool_results: str, repair_note: str) -> DiningPlan:
     windows = format_trip_windows(ctx)
     cap = _format_dining_cap(ctx, intent)
+    mc_hint = _multicity_hint(ctx, intent)
+    dest_label = intent.dest if not ctx.get("dest_cities") else (
+        f"{intent.dest} (cities: {', '.join(ctx['dest_cities'])})"
+    )
     user = (
         f"Intent: {intent.for_specialist('dining')}\n\n"
-        f"Restaurants in {intent.dest}:\n{tool_results}\n\n"
+        f"Restaurants in {dest_label}:\n{tool_results}\n\n"
+        + (mc_hint + "\n\n" if mc_hint else "")
         + (windows + "\n\n" if windows else "")
         + (cap + "\n\n" if cap else "")
         + (f"Repair note: {repair_note}\n\n" if repair_note else "")
         + f"Produce a DiningPlan covering days 1..{intent.days}."
     )
     think = bool(repair_note)
-    return call_json(SYSTEM, user, DiningPlan, max_tokens=1500, think_first=think)
+    return call_json(SYSTEM, user, DiningPlan, max_tokens=4096, think_first=think)
 
 
 def _format_tool_context(ctx: ToolContext) -> str:
@@ -177,10 +203,16 @@ def _format_tool_context(ctx: ToolContext) -> str:
         except (TypeError, ValueError):
             level = 2
         cost = cost_map.get(level, cost_map.get(2, 28))
-        lines.append(
-            f"  [{i}] {r.get('name')} | rating:{r.get('rating')} | "
-            f"est_cost:${cost}"
-        )
+        parts = [
+            f"  [{i}] {r.get('name')}",
+            f"rating:{r.get('rating')}",
+            f"est_cost:${cost}",
+        ]
+        if r.get("cuisines"):
+            parts.append(f"cuisines:{r['cuisines']}")
+        if r.get("city"):
+            parts.append(f"city:{r['city']}")
+        lines.append(" | ".join(parts))
     return "\n".join(lines)
 
 
