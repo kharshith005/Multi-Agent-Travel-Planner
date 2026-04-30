@@ -38,7 +38,7 @@ import pandas as pd
 
 from agents.coordinator import derive_trip_windows, plan_trip
 from agents.llm import call_text, get_call_stats, reset_call_stats
-from agents.models import REGISTRY, available_models, default_model_id, get_model
+from agents.models import REGISTRY, available_models, default_model_id, get_model, resolve_model_id
 from agents.runtime import use_model
 from agents.schemas import FullPlan, Intent, PlanDay, ToolContext
 from baseline.no_specialization import plan_trip_no_specialization
@@ -449,11 +449,13 @@ def main():
         os.environ["LLM_CACHE_DIR"] = args.llm_cache_dir
         print(f"LLM disk cache enabled: {args.llm_cache_dir}", file=sys.stderr)
 
-    # Resolve model list — --models takes precedence over --model
+    # Resolve model list — --models takes precedence over --model.
+    # Aliases (e.g. 'llama-3.3') are expanded to canonical IDs so results.csv
+    # always records the full model ID, not the short alias.
     if args.models:
-        model_ids = _resolve_models(args.models)
+        model_ids = [resolve_model_id(m) for m in _resolve_models(args.models)]
     elif args.model:
-        model_ids = [args.model]
+        model_ids = [resolve_model_id(args.model)]
     else:
         model_ids = [os.environ.get("LLM_MODEL", "").strip() or default_model_id()]
 

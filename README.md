@@ -1,16 +1,8 @@
 # Multi-Agent Travel Itinerary Planner
 
-A coordinator-led multi-agent system for travel-itinerary planning. A Streamlit chat UI drives a LangGraph coordinator + four domain specialists (transport, lodging, dining, sightseeing) + a Budget Agent + a deterministic constraint verifier with a bounded repair loop.
+A coordinator-led multi-agent system that converts a natural-language travel query into a day-by-day itinerary satisfying both user-stated hard constraints and TravelPlanner-style commonsense constraints.
 
-CSE 572 Spring 2026 final project — inspired by **Xie et al. (2024), TravelPlanner: A Benchmark for Real-World Planning with Language Agents** (arXiv:2402.01622). The paper shows GPT-4-Turbo + ReAct hits **0.6%** final pass rate on the TravelPlanner benchmark; the goal here is a multi-agent counter-design that closes that gap.
-
-**Documents in this directory:**
-- [ARCHITECTURE.md](ARCHITECTURE.md) — system architecture reference.
-
-**Workspace-level documents** (one directory up):
-- `../PROJECT_REPORT_PLAN.md` — paper-aligned analysis and report structure.
-- `../CODE_PLAN_MULTI_MODEL.md` — multi-model and provider-auth background.
-- `../CLAUDE.md` — repo conventions for Claude Code sessions.
+Built on **LangGraph** (coordinator state machine), **Pydantic** (inter-agent contracts), and **Streamlit** (chat UI). Evaluated against the **TravelPlanner benchmark** — Xie et al. (2024), arXiv:2402.01622.
 
 ---
 
@@ -19,36 +11,45 @@ CSE 572 Spring 2026 final project — inspired by **Xie et al. (2024), TravelPla
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env               # then edit .env and fill in your keys
+cp .env.example .env   # fill in API keys
 ```
 
-### Required environment
+### Required keys (Gemini + live APIs)
 
-- `VERTEX_AI_API_KEY` — Gemini on Vertex AI (default model: `gemini-2.5-flash-lite`; override via `LLM_MODEL`).
-- `GOOGLE_MAPS_API_KEY` — live sightseeing/lodging and route summaries.
-- `SERPAPI_API_KEY` — live flight options (Google Flights via SerpAPI), with city names resolved to IATA codes.
+| Variable | Purpose |
+|---|---|
+| `VERTEX_AI_API_KEY` | Gemini on Vertex AI |
+| `GOOGLE_MAPS_API_KEY` | Live sightseeing, lodging, and route lookups |
+| `SERPAPI_API_KEY` | Live flight options via Google Flights |
 
-`.env` is gitignored. Runtime is **strict** — missing keys or API failures surface as errors, not silent fallbacks.
+`.env` is gitignored. The runtime is **strict** — missing keys surface as errors, never silent fallbacks.
 
-### Optional: Claude on Vertex AI
+### Optional: Llama 3.3 / Mistral Small 3.1 / GLM-5 on Vertex AI
 
-Additional vars required for Claude models:
+All three models use Application Default Credentials (ADC):
 
-- `GOOGLE_CLOUD_PROJECT` — GCP project with Vertex AI billing enabled and Anthropic Model Garden terms accepted.
-- `CLAUDE_VERTEX_REGION` — e.g. `global` (region varies by Claude SKU).
-- `GOOGLE_APPLICATION_CREDENTIALS` — path to a service-account JSON for headless eval, OR run `gcloud auth application-default login` for interactive use.
-
-When these are not set, Claude options are filtered out of the model picker and the system runs Gemini-only with no behavior change.
-
-### Provider scope
-
-| Provider | On Vertex AI | Status |
+| Variable | Default | Purpose |
 |---|---|---|
-| **Gemini** | yes | Wired up (current default) |
-| **Claude** | yes (Anthropic-Vertex partnership) | Supported via `agents/providers/claude.py` |
-| **GPT/OpenAI** | **no** | Excluded — not hosted on Vertex AI |
+| `GOOGLE_CLOUD_PROJECT` | — | GCP project with Vertex AI enabled |
+| `GOOGLE_APPLICATION_CREDENTIALS` | — | Path to service-account JSON (or use `gcloud auth application-default login`) |
+| `META_VERTEX_REGION` | `us-central1` | Region for Llama 3.3 70B |
+| `MISTRAL_VERTEX_REGION` | `us-central1` | Region for Mistral Small 3.1 |
+| `GLM_VERTEX_REGION` | `global` | Region for GLM-5 (global pooled endpoint) |
 
-GPT models are intentionally not supported. They are not available on Vertex AI; using them would require OpenAI direct or Azure OpenAI Service, which is out of scope for this project.
+Enable each model in Vertex AI Model Garden before use (one-time per-project click-through). When `GOOGLE_CLOUD_PROJECT` is unset or `google-auth` is not installed, these models are silently hidden from the model picker.
+
+### Supported models
+
+| Model | Short alias | Provider | Auth |
+|---|---|---|---|
+| `gemini-3.1-flash-lite-preview` | — | Gemini | `VERTEX_AI_API_KEY` |
+| `gemini-2.5-flash-lite` | `gemini-flash-lite` | Gemini | `VERTEX_AI_API_KEY` |
+| `gemini-2.5-flash` | `gemini-flash` | Gemini | `VERTEX_AI_API_KEY` |
+| `llama-3.3-70b-instruct-maas` | `llama-3.3` | Meta (Vertex MaaS) | ADC + `GOOGLE_CLOUD_PROJECT` |
+| `mistral-small-2503` | `mistral-small-3.1` | Mistral (Vertex MaaS) | ADC + `GOOGLE_CLOUD_PROJECT` |
+| `glm-5-maas` | `glm-5` | GLM (Vertex MaaS) | ADC + `GOOGLE_CLOUD_PROJECT` |
+
+Set `LLM_MODEL=<id or alias>` in `.env` or pass `--model <id or alias>` to the eval CLI.
 
 ---
 
@@ -58,54 +59,51 @@ GPT models are intentionally not supported. They are not available on Vertex AI;
 streamlit run app.py
 ```
 
-Sidebar:
-- **Sub-agent execution** — sequential (specialists run one after another) or parallel (specialists fan out).
-- **Model selection** *(planned)* — pick from the curated low-cost / fast-response Vertex models registered in `agents/models.py`.
+The sidebar exposes sequential vs. parallel specialist execution and a model selector that shows only models whose auth is configured.
 
 ---
 
 ## Run the evaluator
 
-The evaluator runs against the frozen TravelPlanner sandbox (reproducible, no live-API dependency):
+Runs against the frozen TravelPlanner sandbox — no live API calls, reproducible.
 
 ```bash
-# Sanity check — annotated train plans should pass the evaluator near 100%
+# Sanity check: annotated reference plans should pass near 100%
 python -m eval.run_eval --split train --system annotated --limit 10
 
-# Full multi-agent on the first 20 validation queries
+# Full multi-agent on first 20 validation queries
 python -m eval.run_eval --split validation --system multi --limit 20
 
-# Full 180-query evaluation, multi-agent + single-agent baseline
+# Multi-agent + single-agent baseline (180 queries)
 python -m eval.run_eval --split validation --system both
 
 # All four systems for the architectural ablation table
 python -m eval.run_eval --split validation --system all
 
-# Persistent disk cache — makes reruns near-zero-cost
+# Persistent disk cache (makes reruns near-zero-cost)
 python -m eval.run_eval --split validation --system multi --llm-cache-dir .cache/llm
+
+# Run on a specific model (full ID or short alias)
+python -m eval.run_eval --split validation --system multi --model llama-3.3
+
+# Sweep multiple models
+python -m eval.run_eval --split validation --system multi --models gemini-2.5-flash,llama-3.3
 ```
 
-`--system` accepts: `multi` (full multi-agent), `single` (single-agent baseline), `no_verify`, `no_specialization`, `annotated` (sanity check), `both` (multi + single), `all` (multi + single + no_verify + no_specialization).
-
-Additional flags:
-- `--model <id>` — run on a specific registered model.
-- `--models all` or `--models id1,id2,...` — sweep multiple models in one invocation.
-- `--cooldown-seconds N` — sleep between models to manage Vertex quotas.
+`--system` options: `multi`, `single`, `no_verify`, `no_specialization`, `annotated`, `both`, `all`.
 
 Results are written to `eval/results.csv` and a Markdown summary is printed.
 
 ---
 
-## Refresh the sandbox
-
-The shipped TravelPlanner data is from 2022. To regenerate against current-year data while preserving the schema:
+## Validate individual providers
 
 ```bash
-# Dry-run 5 cities to eyeball output
-python scripts/refresh_sandbox.py --subset 5 --provider llm
+# Smoke-test all configured models (parse_intent on a fixed query)
+python scripts/smoke_models.py
 
-# Full refresh (writes Dataset/validation_fresh.csv and validation_fresh_ref_info.jsonl)
-python scripts/refresh_sandbox.py --provider llm --year 2026 --inflation 1.20
+# Preflight env variable check
+python scripts/validate_env.py
 ```
 
 ---
@@ -116,25 +114,33 @@ python scripts/refresh_sandbox.py --provider llm --year 2026 --inflation 1.20
 app.py                      Streamlit chat UI
 
 agents/
-  coordinator.py            LangGraph state machine: parse → research → specialists → verify → repair
-  transport.py              Transport specialist (flights, routes)
+  coordinator.py            LangGraph state machine: parse → research →
+                            specialists → assemble → budget → verify → repair
+  transport.py              Transport specialist (flights, routes, inter-city legs)
   lodging.py                Lodging specialist
   dining.py                 Dining specialist
   sightseeing.py            Sightseeing specialist
   budget.py                 Budget Agent (post-hoc, deterministic)
-  verifier.py               In-loop verifier (8 commonsense + 5 hard rules + responsibility tagging)
-  rules.py                  Rule constants and helpers shared by verifier and evaluator
+  verifier.py               In-loop verifier (8 commonsense + 5 hard rules)
+  rules.py                  Rule constants and helpers
   schemas.py                Pydantic contracts (Intent, FullPlan, ToolContext, …)
-  llm.py                    LLM wrapper (Gemini today; provider-aware facade after Phase 1)
+  llm.py                    LLM facade (two-tier cache, retry, provider dispatch)
+  models.py                 Model registry with short-alias resolution
+  runtime.py                ContextVar for the active model per request
+  providers/
+    __init__.py             call_provider() router + clear_caches()
+    gemini.py               Gemini via google-genai (Vertex API-key mode)
+    vertex_requests.py      Llama, Mistral, GLM-5 via Vertex MaaS + requests
 
 baseline/
-  single_agent.py           Single-LLM-call baseline (paper §4.7 baseline 1)
-  no_specialization.py      Coordinator + one generalist Worker (paper §4.7 baseline 3)
-  no_verify.py              Full pipeline minus verify-and-repair (paper §4.7 baseline 2)
+  single_agent.py           Single-LLM-call baseline (paper §4.7 Baseline 1)
+  no_specialization.py      Coordinator + one generalist Worker (Baseline 3)
+  no_verify.py              Full pipeline minus verify-and-repair (Baseline 2)
 
 eval/
-  run_eval.py               Evaluation CLI
-  constraints.py            TravelPlanner-style scoring evaluator
+  run_eval.py               Evaluation CLI (multi-model sweep, alias resolution)
+  constraints.py            TravelPlanner-style scoring (8 CS + 5 HC rules)
+  state_city_index.json     State → cities map for multi-city query resolution
   results.csv               Sweep output (gitignored)
 
 tools/
@@ -142,7 +148,11 @@ tools/
   sandbox.py                TravelPlanner reference-data sandbox
 
 scripts/
-  refresh_sandbox.py        2022 → 2026 schema-preserving regeneration
+  smoke_models.py           Smoke-test all registered models
+  validate_env.py           Preflight env variable checker
+  refresh_sandbox.py        2022 → 2026 sandbox regeneration (optional)
+
+tests/unit/                 Unit tests (no LLM calls)
 ```
 
-For detail on each component and the planned multi-provider LLM layer, see [ARCHITECTURE.md](ARCHITECTURE.md).
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design reference.

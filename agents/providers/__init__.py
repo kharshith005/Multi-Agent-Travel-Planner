@@ -1,4 +1,4 @@
-"""Provider router — dispatches to Gemini or Claude backends.
+"""Provider router — dispatches to Gemini, Llama, Mistral, or GLM-5 backends.
 
 Usage (via agents/llm.py facade only):
     from agents.providers import call_provider
@@ -21,8 +21,8 @@ def clear_caches() -> None:
     except Exception:
         pass
     try:
-        from .claude import clear_client_cache as _c
-        _c()
+        from .vertex_requests import clear_client_cache as _vr
+        _vr()
     except Exception:
         pass
 
@@ -44,15 +44,16 @@ def call_provider(
     if model.provider == "gemini":
         from .gemini import generate as gemini_generate
         return gemini_generate(model.id, system, user, max_tokens=max_tokens, json_mode=json_mode)
-    elif model.provider == "claude":
-        from .claude import generate as claude_generate
-        return claude_generate(
+    elif model.provider in {"meta", "mistral"}:
+        from .vertex_requests import generate as vr_generate
+        return vr_generate(
             model.id, system, user,
             max_tokens=max_tokens,
-            schema_cls=schema_cls,
+            json_mode=json_mode,
+            provider=model.provider,
         )
     else:
         raise ValueError(
             f"Unknown provider {model.provider!r} for model {model.id!r}. "
-            "Must be 'gemini' or 'claude'."
+            "Must be 'gemini', 'meta', or 'mistral'."
         )

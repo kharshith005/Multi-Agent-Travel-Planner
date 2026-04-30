@@ -8,5 +8,6 @@ llm_cache/
 .DS_Store
 eval/results.csv
 *.log
+# tests/
 # *.md
 # !README.md
