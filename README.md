@@ -41,8 +41,8 @@ Enable each model in Vertex AI Model Garden before use (one-time per-project cli
 
 | Model | Short alias | Provider | Auth |
 |---|---|---|---|
-| `gemini-3.1-flash-lite-preview` | — | Gemini | `VERTEX_AI_API_KEY` |
-| `gemini-2.5-flash-lite` | `gemini-flash-lite` | Gemini | `VERTEX_AI_API_KEY` |
+| `gemini-3.1-flash-lite-preview` | `gemini-flash-lite` | Gemini | `VERTEX_AI_API_KEY` |
+| `gemini-2.5-flash-lite` | — | Gemini | `VERTEX_AI_API_KEY` |
 | `llama-3.3-70b-instruct-maas` | `llama-3.3` | Meta (Vertex MaaS) | ADC + `GOOGLE_CLOUD_PROJECT` |
 | `mistral-small-2503` | `mistral-small-3.1` | Mistral (Vertex MaaS) | ADC + `GOOGLE_CLOUD_PROJECT` |
 
@@ -84,24 +84,12 @@ python -m eval.run_eval --split validation --system multi --llm-cache-dir .cache
 python -m eval.run_eval --split validation --system multi --model llama-3.3
 
 # Sweep multiple models
-python -m eval.run_eval --split validation --system multi --models gemini-2.5-flash,llama-3.3
+python -m eval.run_eval --split validation --system multi --models gemini-flash-lite,llama-3.3
 ```
 
 `--system` options: `multi`, `single`, `no_verify`, `no_specialization`, `annotated`, `both`, `all`.
 
 Results are written to `eval/results.csv` and a Markdown summary is printed.
-
----
-
-## Validate individual providers
-
-```bash
-# Smoke-test all configured models (parse_intent on a fixed query)
-python scripts/smoke_models.py
-
-# Preflight env variable check
-python scripts/validate_env.py
-```
 
 ---
 
@@ -137,6 +125,7 @@ baseline/
 eval/
   run_eval.py               Evaluation CLI (multi-model sweep, alias resolution)
   constraints.py            TravelPlanner-style scoring (8 CS + 5 HC rules)
+  format_report.py          Generate Markdown tables + Pareto chart from results.csv
   state_city_index.json     State → cities map for multi-city query resolution
   results.csv               Sweep output (gitignored)
 
@@ -145,11 +134,11 @@ tools/
   sandbox.py                TravelPlanner reference-data sandbox
 
 scripts/
-  smoke_models.py           Smoke-test all registered models
-  validate_env.py           Preflight env variable checker
   refresh_sandbox.py        2022 → 2026 sandbox regeneration (optional)
+  build_state_index.py      Rebuild eval/state_city_index.json from training corpus
 
-tests/unit/                 Unit tests (no LLM calls)
+architecture.mmd            Mermaid source for the system architecture diagram
+architecture.png            Rendered architecture diagram
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design reference.

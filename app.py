@@ -29,7 +29,7 @@ def _escape_dollars(text: str) -> str:
 # --------- page ---------
 st.set_page_config(page_title="Multi-Agent Travel Planner", layout="wide")
 st.title("Multi-Agent Travel Itinerary Planner")
-st.caption("CSE 572 Spring 2026 — live API planner with coordinator + specialist sub-agents.")
+st.caption("Live API planner with coordinator + specialist sub-agents.")
 
 # --------- sidebar ---------
 with st.sidebar:
@@ -88,7 +88,7 @@ with st.sidebar:
             st.session_state["_last_model_id"] = selected_model_id
             st.session_state.pop("_preflight_ok", None)  # force re-check on model change
     else:
-        st.warning("No models available. Run scripts/validate_env.py to check configuration.")
+        st.warning("No models available. Check that VERTEX_AI_API_KEY is set in .env.")
         selected_model_id = _default_id
 
     # Pre-flight API validation — runs once per model, result cached in session.

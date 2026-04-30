@@ -7,4 +7,3 @@ langgraph>=0.2
 google-genai>=0.7.0
 googlemaps>=4.10.0
 airportsdata>=20241001
-anthropic[vertex]>=0.40.0

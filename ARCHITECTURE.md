@@ -158,8 +158,8 @@ Public API: `call_json`, `call_text`, `reset_call_stats`, `get_call_stats`.
 
 | Model | Provider | Short alias | Auth mode | Default region |
 |---|---|---|---|---|
-| `gemini-3.1-flash-lite-preview` | gemini | — | `vertex_api_key` | — |
-| `gemini-2.5-flash-lite` | gemini | `gemini-flash-lite` | `vertex_api_key` | — |
+| `gemini-3.1-flash-lite-preview` | gemini | `gemini-flash-lite` | `vertex_api_key` | — |
+| `gemini-2.5-flash-lite` | gemini | — | `vertex_api_key` | — |
 | `llama-3.3-70b-instruct-maas` | meta | `llama-3.3` | `vertex_oauth` | `us-central1` |
 | `mistral-small-2503` | mistral | `mistral-small-3.1` | `vertex_oauth` | `us-central1` |
 
@@ -282,7 +282,7 @@ Paper §4.7 architectural ablations:
 9. **GPT/OpenAI intentionally excluded** — Vertex AI does not host OpenAI models.
 10. **Eval path never calls live APIs.** SerpAPI and Google Maps are bypassed; `tool_context` is pre-built from sandbox.
 11. **API key strings never appear in error messages or logs.**
-12. **All API calls have a 120 s timeout.** Gemini: `http_options={"timeout": 120_000}` at client construction. Claude: `timeout=120` on `AnthropicVertex` + per-call. Llama/Mistral: `timeout=120` on `requests.post`.
+12. **All API calls have a 120 s timeout.** Gemini: `http_options={"timeout": 120_000}` at client construction. Llama/Mistral: `timeout=120` on `requests.post`.
 13. **Parallel-write state keys use `Annotated[T, reducer]`** (e.g., `timeline`).
 14. **Short model aliases are resolved to canonical IDs before use.** `resolve_model_id()` is called in `current_model()`, `get_model()`, and `default_model_id()` so cache keys and provider dispatch always see the full ID.
 
@@ -321,6 +321,7 @@ eval/
   run_eval.py               Evaluation CLI (alias resolution, multi-model sweep,
                             per-row city sequence parsing, sandbox ToolContext builder)
   constraints.py            TravelPlanner-style scoring (8 CS + 5 HC, micro/macro)
+  format_report.py          Markdown tables + optional Pareto chart from results.csv
   state_city_index.json     Static state → cities fallback for multi-city queries
   results.csv               Sweep output (gitignored)
 
@@ -330,9 +331,9 @@ tools/
   sandbox.py                TravelPlanner reference-data sandbox + cities_in()
 
 scripts/
-  smoke_models.py           Smoke-test all registered models via parse_intent
-  validate_env.py           Preflight env variable checker
   refresh_sandbox.py        2022 → 2026 sandbox regeneration (optional)
+  build_state_index.py      Rebuild eval/state_city_index.json from training corpus
 
-tests/unit/                 Unit tests (no LLM calls)
+architecture.mmd            Mermaid source for the system architecture diagram
+architecture.png            Rendered architecture diagram
 ```

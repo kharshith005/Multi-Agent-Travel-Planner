@@ -90,7 +90,7 @@ _REGISTRY_BY_ID: dict[str, ModelEntry] = {m.id.split("@", 1)[0]: m for m in REGI
 _ALIASES: dict[str, str] = {
     "llama-3.3":         "llama-3.3-70b-instruct-maas",
     "mistral-small-3.1": "mistral-small-2503",
-    "gemini-flash-lite": "gemini-2.5-flash-lite",
+    "gemini-flash-lite": "gemini-3.1-flash-lite-preview",
 }
 
 
@@ -144,10 +144,10 @@ def available_models() -> list[ModelEntry]:
 
 
 def default_model_id() -> str:
-    """Return the resolved model ID from env or fall back to gemini-2.5-flash-lite.
+    """Return the resolved model ID from env or fall back to gemini-3.1-flash-lite-preview.
 
     Accepts short aliases (e.g. 'llama-3.3', 'mistral-small-3.1') defined in
     _ALIASES and expands them to the full registry ID automatically.
     """
     raw = os.environ.get("LLM_MODEL", "").strip()
-    return resolve_model_id(raw) if raw else "gemini-2.5-flash-lite"
+    return resolve_model_id(raw) if raw else "gemini-3.1-flash-lite-preview"
