@@ -1,13 +1,16 @@
-"""Llama and Mistral backend via Vertex AI OpenAI-compatible MaaS endpoint.
+"""Llama and Mistral backend via Vertex AI.
 
-Correct endpoint pattern (Vertex AI docs):
-  https://{HOST}/v1/projects/{PROJECT}/locations/{REGION}/endpoints/openapi/chat/completions
+Two different endpoint patterns (per Vertex AI Model Garden docs):
 
-  HOST = {REGION}-aiplatform.googleapis.com  (e.g. us-central1-aiplatform.googleapis.com)
+  Llama 3.3 — OpenAI-compatible MaaS endpoint:
+    https://{REGION}-aiplatform.googleapis.com/v1/projects/{PROJECT}
+      /locations/{REGION}/endpoints/openapi/chat/completions
+    Body "model" field: "meta/llama-3.3-70b-instruct-maas"
 
-Model ID in request body must carry the publisher prefix:
-  Llama 3.3   → "meta/llama-3.3-70b-instruct-maas"
-  Mistral 3.1 → "mistralai/mistral-small-2503"
+  Mistral Small 3.1 — rawPredict endpoint:
+    https://{REGION}-aiplatform.googleapis.com/v1/projects/{PROJECT}
+      /locations/{REGION}/publishers/mistralai/models/mistral-small-2503:rawPredict
+    Body "model" field: "mistral-small-2503" (no publisher prefix; it's in the URL)
 
 Auth: Application Default Credentials (ADC) bearer token via google-auth.
 No new Python packages — uses `requests` (already in requirements.txt) and
@@ -28,12 +31,6 @@ except ImportError:
 
 API_TIMEOUT_SECONDS = 120.0
 
-# Publisher prefix used in the request body "model" field.
-_BODY_MODEL_PREFIX = {
-    "meta":    "meta",
-    "mistral": "mistralai",
-}
-
 # Env var that controls the Vertex region for each provider.
 _REGION_ENV = {
     "meta":    "META_VERTEX_REGION",
@@ -51,7 +48,7 @@ def _project() -> str:
     p = os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
     if not p:
         raise RuntimeError(
-            "Set GOOGLE_CLOUD_PROJECT for Llama/Mistral/GLM on Vertex AI. "
+            "Set GOOGLE_CLOUD_PROJECT for Llama/Mistral on Vertex AI. "
             "See .env.example for required variables."
         )
     return p
@@ -78,48 +75,36 @@ def _access_token() -> str:
     return credentials.token
 
 
-def _endpoint_url(provider: str) -> str:
-    """OpenAI-compatible MaaS chat completions URL for the given provider."""
+def _endpoint_url(model_id: str, provider: str) -> str:
+    """Return the correct Vertex AI endpoint URL for the given provider.
+
+    Llama uses the shared OpenAI-compatible MaaS endpoint.
+    Mistral uses its own rawPredict endpoint under publishers/mistralai.
+    """
     region = _region(provider)
     project = _project()
-    return (
-        f"https://{region}-aiplatform.googleapis.com/v1/projects/{project}"
-        f"/locations/{region}/endpoints/openapi/chat/completions"
-    )
+    base = f"https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}"
+    if provider == "meta":
+        return f"{base}/endpoints/openapi/chat/completions"
+    else:  # mistral
+        return f"{base}/publishers/mistralai/models/{model_id}:rawPredict"
 
 
 def _body_model_id(model_id: str, provider: str) -> str:
-    """Return the model ID with publisher prefix for the request body.
+    """Return the model ID string for the request body.
 
-    Vertex AI MaaS requires the publisher prefix, e.g.:
-      "meta/llama-3.3-70b-instruct-maas"
-      "mistralai/mistral-small-2503"
-      "zai-org/glm-5-maas"
+    Llama's OpenAI-compat endpoint requires the publisher prefix.
+    Mistral's rawPredict endpoint encodes the model in the URL, so the body
+    uses the bare model ID.
     """
-    prefix = _BODY_MODEL_PREFIX.get(provider)
-    if prefix is None:
-        raise ValueError(f"Unknown provider {provider!r} for vertex_requests backend")
-    return f"{prefix}/{model_id}"
+    if provider == "meta":
+        return f"meta/{model_id}"
+    return model_id  # mistral: publisher already in URL
 
 
 def clear_client_cache() -> None:
     """No-op — no persistent client. Exists for providers/__init__.py parity."""
     pass
-
-
-def _build_messages(system: str, user: str, provider: str) -> list[dict]:
-    """Build the messages list for the chat request.
-
-    GLM-5 (ZhipuAI) doesn't reliably handle the system role on Vertex AI —
-    it silently returns empty content when a system message is present.
-    For glm, merge the system prompt into the user turn instead.
-    """
-    if provider == "glm":
-        return [{"role": "user", "content": f"{system}\n\n{user}"}]
-    return [
-        {"role": "system", "content": system},
-        {"role": "user",   "content": user},
-    ]
 
 
 def generate(
@@ -131,15 +116,14 @@ def generate(
     json_mode: bool,
     provider: str,
 ) -> tuple[str, int, int]:
-    """Call Llama, Mistral, or GLM-5 on Vertex AI.
+    """Call Llama or Mistral on Vertex AI.
 
     Returns (text, input_tokens, output_tokens).
-    Posts to /endpoints/openapi/chat/completions with the publisher-prefixed
-    model ID. When json_mode=True, requests response_format=json_object for
-    Llama/Mistral; GLM-5 skips response_format entirely (unsupported).
-    Mistral falls back silently if the model rejects response_format (HTTP 400).
+    Llama uses the OpenAI-compatible MaaS endpoint; Mistral uses rawPredict.
+    response_format=json_object is sent only for Llama; Mistral doesn't support
+    it, so plain-text JSON is relied on and parsed by _extract_json in llm.py.
     """
-    url = _endpoint_url(provider)
+    url = _endpoint_url(model_id, provider)
     token = _access_token()
     headers = {
         "Authorization": f"Bearer {token}",
@@ -147,22 +131,17 @@ def generate(
     }
     body: dict = {
         "model": _body_model_id(model_id, provider),
-        "messages": _build_messages(system, user, provider),
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user},
+        ],
         "max_tokens": max_tokens,
     }
-    # GLM-5 doesn't support response_format; skip it to avoid empty responses.
-    if json_mode and provider != "glm":
+    # Mistral on Vertex AI does not support response_format.
+    if json_mode and provider == "meta":
         body["response_format"] = {"type": "json_object"}
 
     resp = _post(url, headers, body)
-
-    # Mistral may reject response_format with HTTP 400; retry once without it.
-    if resp.status_code == 400 and json_mode:
-        err_text = resp.text.lower()
-        if "response_format" in err_text or "not supported" in err_text:
-            body_no_fmt = {k: v for k, v in body.items() if k != "response_format"}
-            resp = _post(url, headers, body_no_fmt)
-
     _raise_for_status(resp, provider)
 
     data = resp.json()
@@ -203,7 +182,11 @@ def _raise_for_status(resp: _requests.Response, provider: str = "") -> None:
         return
     status = resp.status_code
     try:
-        detail = resp.json().get("error", {}).get("message", resp.text[:400])
+        payload = resp.json()
+        # Vertex rawPredict wraps errors in a list: [{error: {...}}]
+        if isinstance(payload, list) and payload:
+            payload = payload[0]
+        detail = payload.get("error", {}).get("message", resp.text[:400])
     except Exception:
         detail = resp.text[:400]
     region_env = _REGION_ENV.get(provider, "META_VERTEX_REGION")

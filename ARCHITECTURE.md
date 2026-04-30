@@ -140,19 +140,18 @@ Public API: `call_json`, `call_text`, `reset_call_stats`, `get_call_stats`.
 - `@functools.lru_cache(maxsize=1)` singleton client, 120 s timeout.
 - `json_mode=True` → `response_mime_type="application/json"`.
 
-**`vertex_requests.py`** — Llama 3.3, Mistral Small 3.1, and GLM-5 via Vertex AI MaaS OpenAI-compatible endpoint.
-- Endpoint pattern: `https://{HOST}/v1/projects/{PROJECT}/locations/{REGION}/endpoints/openapi/chat/completions`
-  - Regional: `{region}-aiplatform.googleapis.com`; Global (GLM-5): `aiplatform.googleapis.com`
+**`vertex_requests.py`** — Llama 3.3 and Mistral Small 3.1 via Vertex AI (two different endpoint patterns).
+- **Llama** → OpenAI-compatible MaaS endpoint: `.../endpoints/openapi/chat/completions`; body `"model": "meta/llama-3.3-70b-instruct-maas"`.
+- **Mistral** → rawPredict endpoint: `.../publishers/mistralai/models/mistral-small-2503:rawPredict`; body `"model": "mistral-small-2503"` (publisher encoded in URL).
 - Uses `requests` (already in `requirements.txt`) + `google-auth` (transitive dep). No new package.
 - Auth: ADC bearer token refreshed before each request via `google.auth.transport.requests.Request()`.
-- GLM-5: `response_format` skipped entirely (returns empty content when set); system prompt merged into user turn (GLM doesn't handle the `system` role reliably).
-- Mistral fallback: if `response_format=json_object` returns HTTP 400, retries once without it.
+- `response_format=json_object` sent only for Llama; Mistral doesn't support it — plain-text JSON is parsed by `_extract_json` in `llm.py`.
 - On 4xx/5xx, re-raises `RuntimeError(status_code=N)` so `agents/llm.py` retry logic handles 429 backoff.
 
 **`__init__.py`** — `call_provider()` routes by `model.provider`:
 ```
-"gemini"                     → gemini.generate()
-"meta" | "mistral" | "glm"   → vertex_requests.generate()
+"gemini"            → gemini.generate()
+"meta" | "mistral"  → vertex_requests.generate()
 ```
 
 ### 4.4 Provider and model reference
@@ -161,10 +160,8 @@ Public API: `call_json`, `call_text`, `reset_call_stats`, `get_call_stats`.
 |---|---|---|---|---|
 | `gemini-3.1-flash-lite-preview` | gemini | — | `vertex_api_key` | — |
 | `gemini-2.5-flash-lite` | gemini | `gemini-flash-lite` | `vertex_api_key` | — |
-| `gemini-2.5-flash` | gemini | `gemini-flash` | `vertex_api_key` | — |
 | `llama-3.3-70b-instruct-maas` | meta | `llama-3.3` | `vertex_oauth` | `us-central1` |
 | `mistral-small-2503` | mistral | `mistral-small-3.1` | `vertex_oauth` | `us-central1` |
-| `glm-5-maas` | glm | `glm-5` | `vertex_oauth` | `global` |
 
 GPT/OpenAI is excluded — Vertex AI does not host OpenAI models.
 
@@ -313,7 +310,7 @@ agents/
   providers/
     __init__.py             call_provider() router + clear_caches()
     gemini.py               Gemini via google-genai (Vertex API-key, lru_cache, 120 s)
-    vertex_requests.py      Llama, Mistral, GLM-5 via Vertex MaaS + requests + google-auth
+    vertex_requests.py      Llama + Mistral via Vertex MaaS + requests + google-auth
 
 baseline/
   single_agent.py           Single-LLM-call baseline (paper §4.7 Baseline 1)

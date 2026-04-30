@@ -1,0 +1,82 @@
+flowchart LR
+
+    %% ── Input ────────────────────────────────────────────────────
+    subgraph INPUT ["Input"]
+        UI["Streamlit <br/>Chat UI"]
+        EVAL["Evaluation <br/>CLI"]
+    end
+
+    %% ── LangGraph Coordinator ────────────────────────────────────
+    subgraph COORD ["LangGraph Coordinator"]
+        PARSE["Parse <br/>Intent"]
+        RESEARCH["Research <br/>Node"]
+        TC[("Tool <br/>Context")]
+    end
+
+    %% ── Specialist Agents ────────────────────────────────────────
+    subgraph SPECS ["Specialist Agents"]
+        TRANS["Transport"]
+        LODG["Lodging"]
+        DINE["Dining"]
+        SIGHT["Sightseeing"]
+    end
+
+    %% ── Validation & Repair ──────────────────────────────────────
+    subgraph VALID ["Validation & Repair"]
+        ASM["Assembler"]
+        BUDG["Budget <br/>Agent"]
+        VER["Verifier"]
+        REP["Repair <br/>Router"]
+    end
+
+    OUT(["FullPlan + <br/>Verifier Report"])
+
+    %% ── LLM Layer ────────────────────────────────────────────────
+    subgraph LLM ["LLM Layer"]
+        FAC["llm.py <br/>facade"]
+        GEM["Gemini <br/>gemini.py"]
+        MAAS["Llama / Mistral <br/>vertex_requests.py"]
+    end
+
+    %% ── Baselines ────────────────────────────────────────────────
+    subgraph BASE ["Baselines"]
+        B1["Single Agent"]
+        B2["No Verify"]
+        B3["No Specialization"]
+    end
+
+    %% ── Edges ────────────────────────────────────────────────────
+    UI    --> PARSE
+    EVAL  --> PARSE
+    PARSE --> RESEARCH --> TC
+    TC    --> TRANS & LODG & DINE & SIGHT
+    TRANS & LODG & DINE & SIGHT --> ASM
+    ASM   --> BUDG --> VER
+    VER   -->|pass| OUT
+    VER   -->|fail| REP
+    REP   -->|retry| ASM
+    FAC   --> GEM & MAAS
+    SPECS -.->|LLM calls| FAC
+    VALID -.->|LLM calls| FAC
+    EVAL  -.-> B1 & B2 & B3
+
+    %% ── Styles ───────────────────────────────────────────────────
+    classDef default  fill:#ffffff,stroke:#ced4da,color:#111
+    classDef store    fill:#ede0f7,stroke:#7c3aed,color:#111
+    classDef result   fill:#dcfce7,stroke:#16a34a,color:#111,font-weight:bold
+    classDef llmnode  fill:#fef2f2,stroke:#dc2626,color:#111
+    classDef backend  fill:#fff7ed,stroke:#ea580c,color:#111
+    classDef baseline fill:#f3f4f6,stroke:#9ca3af,color:#111
+
+    class TC store
+    class OUT result
+    class FAC llmnode
+    class GEM,MAAS backend
+    class B1,B2,B3 baseline
+
+    style INPUT fill:#eff6ff,stroke:#3b82f6,color:#1e40af
+    style COORD fill:#fefce8,stroke:#ca8a04,color:#92400e
+    style SPECS fill:#ecfeff,stroke:#0891b2,color:#164e63
+    style VALID fill:#f0fdf4,stroke:#16a34a,color:#14532d
+    style LLM   fill:#fef2f2,stroke:#dc2626,color:#7f1d1d
+    style BASE  fill:#f9fafb,stroke:#9ca3af,color:#374151

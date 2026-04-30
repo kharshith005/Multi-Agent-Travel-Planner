@@ -30,7 +30,6 @@ class ModelEntry:
 #
 # Cost calibration (relative to gemini-2.5-flash-lite ≈ $0.10/1M input tokens):
 #   Gemini 2.5 Flash-Lite  ~$0.10/M  → 1.0× (baseline)
-#   Gemini 2.5 Flash       ~$0.40/M  → 4.0×
 #   Mistral Small 3.1      ~$0.10/M  → ~1× (Vertex MaaS; calibrate after first run)
 #   Llama 3.3 70B Instruct ~$0.53/M  → ~5× (Vertex MaaS; calibrate after first run)
 # Vertex MaaS models (Llama/Mistral) require GOOGLE_CLOUD_PROJECT + google-auth (ADC).
@@ -57,17 +56,6 @@ REGISTRY: list[ModelEntry] = [
         est_relative_cost=1.0,
         auth_mode="vertex_api_key",
         est_latency_ms_per_call=600,
-    ),
-    ModelEntry(
-        id="gemini-2.5-flash",
-        display_name="Gemini 2.5 Flash",
-        provider="gemini",
-        tier="standard",
-        family="gemini-2.5",
-        default_temperature=0.0,
-        est_relative_cost=4.0,
-        auth_mode="vertex_api_key",
-        est_latency_ms_per_call=900,
     ),
     ModelEntry(
         id="llama-3.3-70b-instruct-maas",
@@ -102,7 +90,6 @@ _REGISTRY_BY_ID: dict[str, ModelEntry] = {m.id.split("@", 1)[0]: m for m in REGI
 _ALIASES: dict[str, str] = {
     "llama-3.3":         "llama-3.3-70b-instruct-maas",
     "mistral-small-3.1": "mistral-small-2503",
-    "gemini-flash":      "gemini-2.5-flash",
     "gemini-flash-lite": "gemini-2.5-flash-lite",
 }
 

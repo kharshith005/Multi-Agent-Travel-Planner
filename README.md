@@ -24,9 +24,9 @@ cp .env.example .env   # fill in API keys
 
 `.env` is gitignored. The runtime is **strict** — missing keys surface as errors, never silent fallbacks.
 
-### Optional: Llama 3.3 / Mistral Small 3.1 / GLM-5 on Vertex AI
+### Optional: Llama 3.3 / Mistral Small 3.1 on Vertex AI
 
-All three models use Application Default Credentials (ADC):
+Both models use Application Default Credentials (ADC):
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -34,7 +34,6 @@ All three models use Application Default Credentials (ADC):
 | `GOOGLE_APPLICATION_CREDENTIALS` | — | Path to service-account JSON (or use `gcloud auth application-default login`) |
 | `META_VERTEX_REGION` | `us-central1` | Region for Llama 3.3 70B |
 | `MISTRAL_VERTEX_REGION` | `us-central1` | Region for Mistral Small 3.1 |
-| `GLM_VERTEX_REGION` | `global` | Region for GLM-5 (global pooled endpoint) |
 
 Enable each model in Vertex AI Model Garden before use (one-time per-project click-through). When `GOOGLE_CLOUD_PROJECT` is unset or `google-auth` is not installed, these models are silently hidden from the model picker.
 
@@ -44,10 +43,8 @@ Enable each model in Vertex AI Model Garden before use (one-time per-project cli
 |---|---|---|---|
 | `gemini-3.1-flash-lite-preview` | — | Gemini | `VERTEX_AI_API_KEY` |
 | `gemini-2.5-flash-lite` | `gemini-flash-lite` | Gemini | `VERTEX_AI_API_KEY` |
-| `gemini-2.5-flash` | `gemini-flash` | Gemini | `VERTEX_AI_API_KEY` |
 | `llama-3.3-70b-instruct-maas` | `llama-3.3` | Meta (Vertex MaaS) | ADC + `GOOGLE_CLOUD_PROJECT` |
 | `mistral-small-2503` | `mistral-small-3.1` | Mistral (Vertex MaaS) | ADC + `GOOGLE_CLOUD_PROJECT` |
-| `glm-5-maas` | `glm-5` | GLM (Vertex MaaS) | ADC + `GOOGLE_CLOUD_PROJECT` |
 
 Set `LLM_MODEL=<id or alias>` in `.env` or pass `--model <id or alias>` to the eval CLI.
 
@@ -130,7 +127,7 @@ agents/
   providers/
     __init__.py             call_provider() router + clear_caches()
     gemini.py               Gemini via google-genai (Vertex API-key mode)
-    vertex_requests.py      Llama, Mistral, GLM-5 via Vertex MaaS + requests
+    vertex_requests.py      Llama + Mistral via Vertex MaaS + requests
 
 baseline/
   single_agent.py           Single-LLM-call baseline (paper §4.7 Baseline 1)
