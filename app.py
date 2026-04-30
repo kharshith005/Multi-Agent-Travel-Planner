@@ -12,7 +12,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from agents import budget as _budget_agent
-from agents.coordinator import intent_constraint_violations, parse_intent, plan_trip
+from agents.coordinator import build_live_tool_context, intent_constraint_violations, parse_intent, plan_trip
 from agents.models import available_models, default_model_id
 from agents.schemas import BudgetReport, FullPlan, Intent, VerifierReport
 from baseline.single_agent import plan_trip_single
@@ -420,10 +420,13 @@ if user_query:
                         model=selected_model_id,
                     )
                 else:
+                    _intent = parsed_intent or parse_intent(run_query)
+                    _live_ctx = build_live_tool_context(_intent, on_progress=on_progress)
                     plan, report = plan_trip_single(
                         run_query,
                         on_progress=on_progress,
-                        parsed_intent=parsed_intent,
+                        parsed_intent=_intent,
+                        tool_context=_live_ctx,
                         model=selected_model_id,
                     )
                 result["plan"] = plan

@@ -72,6 +72,11 @@ INTENT_SYSTEM = (
     "dates (YYYY-MM-DD strings), people, budget (int or null), house_rule, "
     "cuisine, room_type, transportation. Use null when a field is not mentioned. "
     "The trip is always to a single destination city.\n"
+    "IMPORTANT: If the user states a date range (e.g. 'June 1 to June 3'), include "
+    "BOTH the start date and end date in `dates` (e.g. ['2026-06-01', '2026-06-03']) "
+    "and set `days` to the number of days in that range (inclusive). "
+    "If only a start date is given, include just that one date in `dates` and set "
+    "`days` from any explicit duration mentioned; if no duration, set `days` to 1.\n"
     "IMPORTANT: If the user did NOT state an unambiguous trip START date, return "
     "an empty `dates` list. Do not guess a start date. Do not use today's date.\n"
     "IMPORTANT: When multiple cuisines, room rules, or transportation modes are "
@@ -1150,6 +1155,185 @@ def _build_graph(
 
     graph.add_edge("finalize", END)
     return graph.compile()
+
+
+def build_live_tool_context(
+    intent: Intent,
+    on_progress: Callable[[str], None] | None = None,
+) -> ToolContext:
+    """Fetch live API data for *intent* and return a populated ToolContext.
+
+    Shared by both the multi-agent coordinator (via research_node) and the
+    single-agent baseline so all app-path executions use live data.
+    """
+    import os
+
+    if on_progress:
+        on_progress(f"Research: fetching live data for {intent.dest}...")
+    live = default_live_apis()
+    depart = intent.dates[0] if intent.dates else ""
+    ret    = intent.dates[-1] if intent.dates else ""
+
+    ctx: ToolContext = {}  # type: ignore[assignment]
+
+    try:
+        ctx["route_drive"] = live.route_summary(intent.org, intent.dest, "driving")
+    except Exception:
+        ctx["route_drive"] = None
+    try:
+        ctx["route_taxi"] = live.route_summary(intent.org, intent.dest, "taxi")
+    except Exception:
+        ctx["route_taxi"] = None
+
+    flight_warnings: list[str] = []
+    serpapi_key  = os.environ.get("SERPAPI_API_KEY", "").strip()
+    drive_dist_mi = _parse_drive_distance(ctx.get("route_drive"))
+    dest_lat: float | None = None
+    dest_lon: float | None = None
+
+    if drive_dist_mi is not None and drive_dist_mi <= 100:
+        ctx["flights_outbound"] = []
+        ctx["flights_return"]   = []
+        ctx["flights_round_trip"] = False
+        if on_progress:
+            on_progress(
+                f"Trip is {int(drive_dist_mi)} mi — "
+                "using drive-only transport (no flight search)."
+            )
+    elif not serpapi_key:
+        ctx["flights_outbound"] = []
+        ctx["flights_return"]   = []
+        ctx["flights_round_trip"] = False
+    else:
+        try:
+            org_iata, _, org_drive_leg, _, _ = live._resolve_with_fallback(
+                intent.org, on_progress=on_progress
+            )
+            dest_iata, _, dest_drive_leg, dest_lat, dest_lon = live._resolve_with_fallback(
+                intent.dest, on_progress=on_progress
+            )
+            out_arrival_drive = _reverse_drive_leg(dest_drive_leg, intent.dest)
+            ret_arrival_drive = _reverse_drive_leg(org_drive_leg, intent.org)
+
+            rt_ok = False
+            if depart and ret and ret != depart:
+                try:
+                    out_strs, ret_strs = live.flight_search_round_trip(
+                        org_iata, dest_iata, depart, ret,
+                        dep_id=org_iata, arr_id=dest_iata,
+                        on_progress=on_progress,
+                    )
+                    ctx["flights_outbound"] = [
+                        _compose_flight_segments(org_drive_leg, f, out_arrival_drive)
+                        for f in out_strs
+                    ]
+                    ctx["flights_return"] = [
+                        _compose_flight_segments(dest_drive_leg, f, ret_arrival_drive)
+                        for f in ret_strs
+                    ]
+                    ctx["flights_round_trip"] = True
+                    rt_ok = True
+                except RuntimeError as e:
+                    flight_warnings.append(f"round-trip search failed, using one-ways: {e}")
+
+            if not rt_ok:
+                try:
+                    out_strs = live.flight_search(
+                        org_iata, dest_iata, depart,
+                        prefer_early_departure=True, on_progress=on_progress,
+                    )
+                    ctx["flights_outbound"] = [
+                        _compose_flight_segments(org_drive_leg, f, out_arrival_drive)
+                        for f in out_strs
+                    ]
+                except RuntimeError as e:
+                    ctx["flights_outbound"] = []
+                    flight_warnings.append(f"outbound flight search failed: {e}")
+                try:
+                    ret_strs = live.flight_search(
+                        dest_iata, org_iata, ret,
+                        prefer_late_departure=True, on_progress=on_progress,
+                    )
+                    ctx["flights_return"] = [
+                        _compose_flight_segments(dest_drive_leg, f, ret_arrival_drive)
+                        for f in ret_strs
+                    ]
+                except RuntimeError as e:
+                    ctx["flights_return"] = []
+                    flight_warnings.append(f"return flight search failed: {e}")
+                ctx["flights_round_trip"] = False
+
+        except RuntimeError as e:
+            ctx["flights_outbound"] = []
+            ctx["flights_return"]   = []
+            ctx["flights_round_trip"] = False
+            flight_warnings.append(f"airport resolution failed: {e}")
+
+    if flight_warnings and on_progress:
+        on_progress(
+            "Flight search: " + "; ".join(flight_warnings)
+            + " — transport specialist will use driving/taxi fallback."
+        )
+
+    cuisine_count = len([c for c in (intent.cuisine or "").split(",") if c.strip()])
+    n_hotels      = min(25, max(15, intent.days * 3))
+    n_restaurants = min(50, max(16, intent.days * 4 + cuisine_count * 4))
+    n_attractions = min(35, max(16, intent.days * 4))
+
+    if dest_lat is not None and dest_lon is not None:
+        try:
+            budget_lvls = budget.price_levels_for_nightly_target(intent)
+            hotels_geo  = live.search_lodging_near(
+                (dest_lat, dest_lon),
+                budget_levels=budget_lvls,
+                max_results=n_hotels,
+            )
+        except Exception:
+            hotels_geo = []
+        ctx["hotels"] = hotels_geo or live.search_places(
+            intent.dest, "hotels", max_results=n_hotels
+        )
+    else:
+        ctx["hotels"] = live.search_places(intent.dest, "hotels", max_results=n_hotels)
+
+    ctx["restaurants"] = live.search_places(
+        intent.dest, "restaurants", max_results=n_restaurants
+    )
+    ctx["attractions"] = live.search_places(
+        intent.dest, "top tourist attractions", max_results=n_attractions
+    )
+
+    if not ctx.get("hotels"):
+        raise RuntimeError(
+            f"No hotel results returned for '{intent.dest}'. "
+            "Check GOOGLE_MAPS_API_KEY and destination spelling."
+        )
+    if not ctx.get("restaurants"):
+        raise RuntimeError(f"No restaurant results returned for '{intent.dest}'.")
+    if not ctx.get("attractions"):
+        raise RuntimeError(f"No attraction results returned for '{intent.dest}'.")
+
+    caps = budget.allocate(intent)
+    if caps:
+        ctx["category_caps"]          = caps
+        ctx["meal_cost_targets"]       = budget.derive_meal_targets(intent)
+        ctx["lodging_cost_targets"]    = budget.derive_lodging_targets(intent)
+        ctx["transport_one_way_target"] = budget.derive_transport_target(intent)
+
+    tw = derive_trip_windows(
+        ctx.get("flights_outbound") or [],
+        ctx.get("flights_return") or [],
+    )
+    if any(v is not None for v in tw.values()):
+        ctx["trip_windows"] = tw
+
+    if on_progress:
+        on_progress(
+            f"Research complete: {len(ctx['hotels'])} hotels, "
+            f"{len(ctx['restaurants'])} restaurants, "
+            f"{len(ctx['attractions'])} attractions fetched."
+        )
+    return ctx
 
 
 def plan_trip(

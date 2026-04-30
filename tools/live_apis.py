@@ -91,6 +91,7 @@ class _FlightOption:
     price: int | None
     duration_min: int | None
     departure_token: str | None = None
+    flight_number: str | None = None
 
 
 
@@ -333,6 +334,7 @@ class LiveTravelAPIs:
                         arr_time=arr,
                         price=price,
                         duration_min=duration_min,
+                        flight_number=first.get("flight_number") or None,
                     )
                 )
 
@@ -352,7 +354,8 @@ class LiveTravelAPIs:
         out: list[str] = []
         for o in ranked[:max_results]:
             duration_txt = self._format_duration(o.duration_min)
-            seg = f"{o.airline} {o.dep_time}->{o.arr_time}"
+            fn = f" {o.flight_number}" if o.flight_number else ""
+            seg = f"{o.airline}{fn} {o.dep_time}->{o.arr_time}"
             if duration_txt:
                 seg += f" Duration: {duration_txt}"
             if o.price is not None:
@@ -605,6 +608,7 @@ class LiveTravelAPIs:
                     price=self._parse_price(option.get("price")),
                     duration_min=self._extract_duration_minutes(option),
                     departure_token=token,
+                    flight_number=first.get("flight_number") or None,
                 ))
 
         if not outbound_candidates:
@@ -657,6 +661,7 @@ class LiveTravelAPIs:
                     arr_time=(last.get("arrival_airport") or {}).get("time", ""),
                     price=None,
                     duration_min=self._extract_duration_minutes(option),
+                    flight_number=first.get("flight_number") or None,
                 ))
 
         if not return_candidates:
@@ -693,7 +698,8 @@ class LiveTravelAPIs:
         # ── Format output ─────────────────────────────────────────────────────
         out_strs: list[str] = []
         for o in top_outbounds:
-            seg = f"{o.airline} {o.dep_time}->{o.arr_time}"
+            fn = f" {o.flight_number}" if o.flight_number else ""
+            seg = f"{o.airline}{fn} {o.dep_time}->{o.arr_time}"
             dur = self._format_duration(o.duration_min)
             if dur:
                 seg += f" Duration: {dur}"
@@ -706,7 +712,8 @@ class LiveTravelAPIs:
         ordered_returns = [best_return] + [r for r in return_candidates if r is not best_return]
         ret_strs: list[str] = []
         for r in ordered_returns[:max_results]:
-            seg = f"{r.airline} {r.dep_time}->{r.arr_time}"
+            fn = f" {r.flight_number}" if r.flight_number else ""
+            seg = f"{r.airline}{fn} {r.dep_time}->{r.arr_time}"
             dur = self._format_duration(r.duration_min)
             if dur:
                 seg += f" Duration: {dur}"

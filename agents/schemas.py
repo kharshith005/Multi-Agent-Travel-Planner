@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Literal, Optional, TypedDict
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -38,6 +39,20 @@ class Intent(BaseModel):
         if isinstance(v, (list, tuple)):
             return ", ".join(str(x) for x in v if x and str(x).strip()) or None
         return v
+
+    @model_validator(mode="after")
+    def _derive_days_from_dates(self) -> "Intent":
+        # When days wasn't explicitly stated (still at default=1) but the user
+        # provided a date range, compute days from the first and last date.
+        if self.days == 1 and len(self.dates) >= 2:
+            try:
+                d0 = datetime.strptime(self.dates[0][:10], "%Y-%m-%d").date()
+                d1 = datetime.strptime(self.dates[-1][:10], "%Y-%m-%d").date()
+                if d1 > d0:
+                    self.days = min(max((d1 - d0).days + 1, 1), 14)
+            except ValueError:
+                pass
+        return self
 
     def for_specialist(self, name: str) -> dict:
         """Return only the Intent fields relevant to the named specialist.

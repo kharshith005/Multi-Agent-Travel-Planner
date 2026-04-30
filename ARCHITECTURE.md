@@ -10,7 +10,7 @@ A coordinator-led multi-agent system that converts a natural-language travel que
 
 Two execution paths share the same coordinator and specialist code:
 
-1. **Live API path** (`app.py`) — research node calls Google Maps + SerpAPI; specialists plan over real-world data.
+1. **Live API path** (`app.py`) — research node calls Google Maps + SerpAPI; specialists plan over real-world data. Both multi-agent and single-agent modes use live APIs in this path via `build_live_tool_context()`.
 2. **Sandbox eval path** (`eval/run_eval.py`) — research node is replaced by a `ToolContext` built from TravelPlanner reference data; specialists are unaware of the substitution because the dict shape is identical.
 
 This dual-path design is load-bearing: the same multi-agent code ships in the app and produces the benchmark numbers.
@@ -171,6 +171,8 @@ GPT/OpenAI is excluded — Vertex AI does not host OpenAI models.
 
 All inter-agent communication uses Pydantic models with `model_validator(mode="before")` normalizers that absorb common LLM shape drift. Preserve these normalizers when editing schemas.
 
+**`Intent`** has a `model_validator(mode="after")` (`_derive_days_from_dates`) that computes `days` from the start and end dates when the LLM returns a date range but no explicit duration — e.g. `dates: ["2026-06-01", "2026-06-05"]` → `days = 5`. The validator only fires when `days == 1` (the default), leaving explicitly stated durations untouched.
+
 | Schema | Producer | Consumer |
 |---|---|---|
 | `Intent` | `parse_intent` | All specialists, verifier, evaluator |
@@ -267,6 +269,8 @@ Paper §4.7 architectural ablations:
 | `no_verify.py` | Verifier + repair loop (`skip_verify=True`) | Paper Baseline 2 |
 | `no_specialization.py` | Role specialists (one generalist Worker) | Paper Baseline 3 |
 
+In the **app path**, `single_agent.py` calls `build_live_tool_context()` (from `coordinator.py`) to populate a `ToolContext` from live APIs before invoking `plan_trip_single()` — the same live data as the multi-agent path. In the **eval path** it falls back to the TravelPlanner sandbox.
+
 ---
 
 ## 11. Design invariants
@@ -294,8 +298,7 @@ Paper §4.7 architectural ablations:
 app.py                      Streamlit chat UI
 
 agents/
-  coordinator.py            LangGraph state machine; parallel specialist fan-out;
-                            mechanical pre-repair + LLM repair
+  coordinator.py            LangGraph state machine; parallel specialist fan-out; mechanical pre-repair + LLM repair
   transport.py              Transport specialist (flights, routes, inter-city legs)
   lodging.py                Lodging specialist
   dining.py                 Dining specialist
@@ -326,14 +329,11 @@ eval/
   results.csv               Sweep output (gitignored)
 
 tools/
-  live_apis.py              Google Maps + SerpAPI; airport → (IATA, city, leg, lat, lon);
-                            geo-radius hotel search; round-trip flight protocol
+  live_apis.py              Google Maps + SerpAPI; airport → (IATA, city, leg, lat, lon); geo-radius hotel search; round-trip flight protocol
   sandbox.py                TravelPlanner reference-data sandbox + cities_in()
 
 scripts/
   refresh_sandbox.py        2022 → 2026 sandbox regeneration (optional)
   build_state_index.py      Rebuild eval/state_city_index.json from training corpus
 
-architecture.mmd            Mermaid source for the system architecture diagram
-architecture.png            Rendered architecture diagram
 ```

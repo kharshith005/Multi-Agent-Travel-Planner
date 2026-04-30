@@ -99,8 +99,7 @@ Results are written to `eval/results.csv` and a Markdown summary is printed.
 app.py                      Streamlit chat UI
 
 agents/
-  coordinator.py            LangGraph state machine: parse → research →
-                            specialists → assemble → budget → verify → repair
+  coordinator.py            LangGraph state machine: parse → research → specialists → assemble → budget → verify → repair
   transport.py              Transport specialist (flights, routes, inter-city legs)
   lodging.py                Lodging specialist
   dining.py                 Dining specialist
@@ -137,8 +136,6 @@ scripts/
   refresh_sandbox.py        2022 → 2026 sandbox regeneration (optional)
   build_state_index.py      Rebuild eval/state_city_index.json from training corpus
 
-architecture.mmd            Mermaid source for the system architecture diagram
-architecture.png            Rendered architecture diagram
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design reference.
