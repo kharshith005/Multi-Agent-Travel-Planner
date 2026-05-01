@@ -784,9 +784,28 @@ def _build_graph(
         else:
             ctx["hotels"] = live.search_places(intent.dest, "hotels", max_results=n_hotels)
 
-        ctx["restaurants"] = live.search_places(
-            intent.dest, "restaurants", max_results=n_restaurants
-        )
+        # Cuisine-targeted searches come first so the pool contains tagged hits
+        # the dining specialist can match against via the `cuisines` field.
+        cuisines_list = [c.strip().lower() for c in (intent.cuisine or "").split(",") if c.strip()]
+        restaurants: list[dict] = []
+        seen_r: set[str] = set()
+        if cuisines_list:
+            per_cuisine_quota = max(6, n_restaurants // (len(cuisines_list) + 1))
+            for cuisine in cuisines_list:
+                for r in live.search_places(intent.dest, f"{cuisine} restaurants", max_results=per_cuisine_quota):
+                    name = (r.get("name") or "").strip()
+                    if not name or name.lower() in seen_r:
+                        continue
+                    r["cuisines"] = cuisine
+                    restaurants.append(r)
+                    seen_r.add(name.lower())
+        for r in live.search_places(intent.dest, "restaurants", max_results=n_restaurants):
+            name = (r.get("name") or "").strip()
+            if not name or name.lower() in seen_r:
+                continue
+            restaurants.append(r)
+            seen_r.add(name.lower())
+        ctx["restaurants"] = restaurants[:n_restaurants]
         ctx["attractions"] = live.search_places(
             intent.dest, "top tourist attractions", max_results=n_attractions
         )

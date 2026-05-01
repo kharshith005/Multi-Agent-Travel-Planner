@@ -46,7 +46,7 @@ with st.sidebar:
     if is_multi_agent:
         execution_mode = st.radio(
             "Sub-agent execution",
-            ["single agent at a time (sequential)", "multiple agents in parallel"],
+            ["multiple agents in parallel", "single agent at a time (sequential)"],
             index=0,
         )
         execution_mode_arg = "sequential" if execution_mode.startswith("single") else "parallel"
